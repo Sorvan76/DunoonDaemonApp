@@ -35,7 +35,8 @@ class Session:
             location=data.get("location", ""),
             threat=data.get("threat", ""),
             opportunity=data.get("opportunity", ""),
-            is_deceased=data.get("is_deceased", False)
+            is_deceased=data.get("is_deceased", False),
+            narrative_freedom=data.get("narrative_freedom", False)
         )
         s.last_mood_update = data.get("last_mood_update", None)
         return s
@@ -66,6 +67,7 @@ class Session:
             "threat": getattr(self, "threat", ""),
             "opportunity": getattr(self, "opportunity", ""),
             "is_deceased": getattr(self, "is_deceased", False),
+            "narrative_freedom": getattr(self, "narrative_freedom", False),
             "last_mood_update": getattr(self, "last_mood_update", None)
         }
 
@@ -76,7 +78,7 @@ class Session:
                  blind_to_others=False, backstory="", eto_enabled=True, mortality_enabled=False,
                  physiology="Normal (Standard Organic humanoid)",
                  powers="None (Standard human baseline capabilities)", location="", threat="",
-                 opportunity="", is_deceased=False):
+                 opportunity="", is_deceased=False, narrative_freedom=False):
         
         self.window = None
         self.id = id or str(uuid.uuid4())
@@ -98,6 +100,9 @@ class Session:
         self.threat = threat or ""
         self.opportunity = opportunity or ""
         self.is_deceased = bool(is_deceased)
+        # OFF by default: the user owns unstated consequential world facts unless
+        # collaborative worldbuilding is explicitly enabled for this persona.
+        self.narrative_freedom = bool(narrative_freedom)
 
         if self.psychology_mode == "grey_analytical":
             self.ocean_profile = {
@@ -175,13 +180,7 @@ class SessionManager:
             self._seed_default_companion()
             return
 
-        if isinstance(data, list):
-            loaded_sessions = data
-        elif isinstance(data, dict):
-            loaded_sessions = data.get("sessions", [])
-        else:
-            loaded_sessions = []
-
+        loaded_sessions = data.get("sessions", [])
         if not loaded_sessions:
             self._seed_default_companion()
             return

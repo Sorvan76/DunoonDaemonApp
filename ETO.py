@@ -265,6 +265,7 @@ class ETOEngine:
         physiology: str = "",
         powers: str = "",
         recent_context: str = "",
+        narrative_freedom: bool = False,
     ) -> str:
         """
         Build a scenario-agnostic continuity directive.
@@ -375,6 +376,30 @@ class ETOEngine:
             "12. EMBODIMENT: Maintain plausible reach, line of sight, movement, support and physical interaction, but avoid repetitive procedural "
             "body narration when nothing materially changes.",
         ])
+
+        if narrative_freedom:
+            lines.extend([
+                "\n[COLLABORATIVE WORLDBUILDING: ENABLED]",
+                "You may reasonably fill genuine narrative gaps with new external details, discoveries, document contents, "
+                "background facts, complications, locations, NPC actions, or plot developments when doing so naturally advances "
+                "the scene and fits the established world.",
+                "Treat this as collaborative authorship, not unlimited control. Do not contradict authoritative facts, erase "
+                "established consequences, grant yourself convenient unsupported powers/resources, or dictate another participant's "
+                "private thoughts, choices, speech, or reactions.",
+                "Prefer additions that grow organically from what is already established rather than unrelated twists for their own sake."
+            ])
+        else:
+            lines.extend([
+                "\n[NARRATIVE AUTHORITY: USER-LED]",
+                "Control your own speech, thoughts, decisions, emotions, and voluntary actions freely, but do not turn unknown "
+                "external facts into established reality merely to keep the story moving.",
+                "Consequential unknowns belong to the user/system until established. This includes unseen or unread information, "
+                "the contents of documents or messages not provided, hidden history, new threats or resources, major off-screen events, "
+                "new locations/routes, NPC decisions, and plot-changing discoveries.",
+                "You may make clearly uncertain guesses, suspicions, questions, or interpretations without presenting them as facts.",
+                "Minor non-consequential descriptive texture is allowed when it does not create a new obligation, solution, danger, "
+                "resource, history, capability, or plot direction."
+            ])
 
         if self.stagnation_turns >= 2 and self.stakes_level >= 0.6:
             lines.extend([

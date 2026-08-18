@@ -2305,7 +2305,27 @@ class ControllerApp:
             bd=0
         )
         chk_eto.pack(anchor="w", pady=(2, 0))
-        self._register_tooltip(chk_eto, "Enforces physical medium constraints, hazard escalation, and anti-hallucination rules.")
+        self._register_tooltip(chk_eto, "Keeps the character grounded in established scene facts, physical limits, threats, and opportunities.")
+
+        narrative_var = tk.BooleanVar(value=getattr(session, "narrative_freedom", False))
+        chk_narrative = tk.Checkbutton(
+            chk_frame,
+            text="Allow Collaborative Plot / Worldbuilding",
+            variable=narrative_var,
+            bg=bg_col,
+            fg="#ffcc00",
+            selectcolor=entry_bg,
+            activebackground=bg_col,
+            activeforeground="#ffcc00",
+            font=FONT_BODY,
+            bd=0
+        )
+        chk_narrative.pack(anchor="w", pady=(2, 0))
+        self._register_tooltip(
+            chk_narrative,
+            "When enabled, this persona may invent reasonable unstated plot and world details. "
+            "When disabled, consequential unknown facts are left for you to establish."
+        )
 
         mortality_var = tk.BooleanVar(value=getattr(session, "mortality_enabled", False))
         chk_mortality = tk.Checkbutton(
@@ -2334,6 +2354,7 @@ class ControllerApp:
             session.share_insights = share_var.get()
             session.blind_to_others = blind_var.get()
             session.eto_enabled = eto_var.get()
+            session.narrative_freedom = narrative_var.get()
             session.mortality_enabled = mortality_var.get()
             session.physiology = entry_phys.get().strip() or "Normal (Standard Organic humanoid)"
             session.powers = entry_powers.get().strip() or "None (Standard human baseline)"

@@ -164,6 +164,7 @@ def build_overmind_packet(user_text: str, session, state_engine=None):
         backstory_txt = getattr(session, "backstory", "") or ""
         phys_txt = getattr(session, "physiology", "") or "Normal (Standard Organic humanoid)"
         powers_txt = getattr(session, "powers", "") or "None (Standard human baseline capabilities)"
+        narrative_freedom = bool(getattr(session, "narrative_freedom", False))
 
         recent_corpus = " ".join([m.get("content", "") for m in history[-4:]]) + f" {user_text}"
 
@@ -173,7 +174,8 @@ def build_overmind_packet(user_text: str, session, state_engine=None):
             backstory=backstory_txt,
             physiology=phys_txt,
             powers=powers_txt,
-            recent_context=recent_corpus
+            recent_context=recent_corpus,
+            narrative_freedom=narrative_freedom
         )
         if eto_block:
             system_prompt_parts.append(eto_block)
