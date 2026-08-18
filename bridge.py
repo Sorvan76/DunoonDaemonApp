@@ -1,8 +1,20 @@
 # bridge.py — Dynamic LM Studio Bridge Engine
 import requests
+import threading
 
 LM_STUDIO_URL = "http://127.0.0.1:1234/v1/chat/completions"
 MODELS_URL = "http://127.0.0.1:1234/v1/models"
+
+
+_reply_state = threading.local()
+
+def reset_last_finish_reason() -> None:
+    """Clear transport completion metadata for the current inference thread."""
+    _reply_state.finish_reason = None
+
+def get_last_finish_reason():
+    """Return LM Studio's finish_reason for the current inference thread, if available."""
+    return getattr(_reply_state, "finish_reason", None)
 
 
 class LMStudioOfflineError(Exception):
@@ -25,6 +37,7 @@ def get_active_model_name() -> str:
 
 
 def lmstudio_reply(system_prompt: str, user_text: str, history: list = None) -> str:
+    reset_last_finish_reason()
     """
     Sends structured prompt packet to LM Studio with full history context,
     dynamic model detection, and an extended 90-second timeout.
@@ -56,6 +69,12 @@ def lmstudio_reply(system_prompt: str, user_text: str, history: list = None) -> 
         data = response.json()
         
         choices = data.get("choices", [])
+        if choices:
+            try:
+                _reply_state.finish_reason = choices[0].get("finish_reason")
+            except Exception:
+                _reply_state.finish_reason = None
+
         if choices and "message" in choices[0]:
             content = choices[0]["message"].get("content", "").strip()
             if content:

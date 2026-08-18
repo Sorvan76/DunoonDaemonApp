@@ -41,6 +41,7 @@ from config import (
     get_session_vault_paths, ensure_dirs
 )
 from ETO import ETOEngine
+from bridge import get_last_finish_reason, reset_last_finish_reason
 
 ensure_dirs()
 
@@ -966,6 +967,108 @@ class ControllerApp:
 
         empty_stall_count = {sessions[0].id: 0, sessions[1].id: 0}
 
+
+        def _arena_turn_incomplete(raw_reply, clean_reply, finish_reason=None):
+            """
+            Transport/syntax completion guard.
+            This deliberately does NOT interpret story vocabulary or scenario meaning.
+            """
+            raw = str(raw_reply or "")
+            clean = str(clean_reply or "").strip()
+            reason = str(finish_reason or "").strip().lower()
+
+            # Backend explicitly reports token/length exhaustion.
+            if reason in {"length", "max_tokens", "token_limit", "context_length"}:
+                return True, f"backend finish_reason={reason}"
+
+            # A started telemetry envelope that never closes is a hard transport truncation.
+            meta_start = raw.lower().find("<!--meta:")
+            if meta_start != -1 and "-->" not in raw[meta_start:]:
+                return True, "unterminated telemetry envelope"
+
+            if not clean:
+                return True, "empty visible response"
+
+            # Unbalanced markdown/dialogue delimiters are strong syntactic truncation signals.
+            if clean.count('"') % 2 != 0:
+                return True, "unclosed quotation"
+            if clean.count('*') % 2 != 0:
+                return True, "unclosed action/markdown delimiter"
+
+            # A substantial response ending with no sentence/dialogue/action closure is suspicious.
+            # This catches cuts such as "...the grey shadow glides through" without relying on
+            # any story-specific words.
+            terminal = clean.rstrip()
+            if len(terminal) >= 40 and terminal[-1] not in '.!?…"”\'*)]}':
+                return True, "response ended without a closing boundary"
+
+            return False, ""
+
+        def _repair_arena_turn(speaker_sess, speaker_name, target_name, raw_reply, clean_reply):
+            """
+            Make ONE internal continuation attempt. The repair instruction is internal_control,
+            so it cannot become authoritative world state.
+            """
+            visible_fragment = str(clean_reply or "").strip()
+            telemetry_only = visible_fragment.lower().startswith("<!--meta:") and "-->" not in visible_fragment
+
+            if not visible_fragment or telemetry_only:
+                repair_prompt = (
+                    "[INTERNAL TURN REPAIR: The previous generation failed before producing a usable "
+                    "visible turn. Generate the intended response now from the same scene prompt. "
+                    "Do not mention the failure or these repair instructions.]\\n\\n"
+                    f"[ORIGINAL TURN PROMPT]\\n{original_prompt}"
+                )
+            else:
+                repair_prompt = (
+                    "[INTERNAL TURN REPAIR: Your previous generation ended before the turn was complete. "
+                    "Continue directly from the exact point where it stopped. Do not restart, recap, repeat, "
+                    "or alter the text already produced. Complete the thought naturally in character. "
+                    "Return only the continuation of the interrupted turn.]\\n\\n"
+                    f"[INTERRUPTED RESPONSE]\\n{visible_fragment}"
+                )
+
+            reset_last_finish_reason()
+            try:
+                if hasattr(self, "brain") and self.brain:
+                    repaired_raw = self.brain.infer(
+                        repair_prompt,
+                        speaker_sess,
+                        source="internal_control"
+                    )
+                else:
+                    from overmind import overmind
+                    repaired_raw = overmind(
+                        repair_prompt,
+                        speaker_sess,
+                        source="internal_control"
+                    )
+            except Exception as e:
+                return None, None, f"repair inference failed: {e}"
+
+            repaired_meta, repaired_clean = _extract_dual_channel_meta(str(repaired_raw))
+            repaired_clean = repaired_clean.strip()
+            repaired_reason = get_last_finish_reason()
+
+            still_bad, why = _arena_turn_incomplete(
+                repaired_raw,
+                repaired_clean,
+                repaired_reason
+            )
+            if still_bad:
+                return None, None, f"repair also incomplete: {why}"
+
+            # Join at a single whitespace boundary; no invented punctuation.
+            base = str(clean_reply or "").rstrip()
+            if base.lower().startswith("<!--meta:") and "-->" not in base:
+                base = ""
+            continuation = repaired_clean.lstrip()
+            combined = (base + " " + continuation).strip() if base else continuation
+
+            # Preserve the original turn's telemetry where available. The repair is transport
+            # completion, not a second narrative turn.
+            return combined, repaired_meta, None
+
         top_bar = tk.Frame(dialog, padx=8, pady=6)
         top_bar.pack(side=tk.TOP, fill=tk.X)
 
@@ -1236,6 +1339,7 @@ class ControllerApp:
                 )
 
             def worker():
+                reset_last_finish_reason()
                 try:
                     if hasattr(self, "brain") and self.brain:
                         reply = self.brain.infer(prompt, speaker_sess, source="arena_peer")
@@ -1249,12 +1353,48 @@ class ControllerApp:
                     is_generating[0] = False
                     return
 
+                finish_reason = get_last_finish_reason()
                 meta_data, clean = _extract_dual_channel_meta(str(reply))
-
                 clean = clean.strip()
-                if clean.endswith("--") or clean.endswith("-"): clean = clean.rstrip("-") + "..."
-                if clean.count('"') % 2 != 0: clean += '"'
-                if clean.count('*') % 2 != 0: clean += '*'
+
+                incomplete, incomplete_reason = _arena_turn_incomplete(
+                    reply,
+                    clean,
+                    finish_reason
+                )
+
+                if incomplete:
+                    repaired_clean, repaired_meta, repair_error = _repair_arena_turn(
+                        speaker_sess,
+                        speaker_name,
+                        target_name,
+                        reply,
+                        clean,
+                        prompt,
+                        incomplete_reason
+                    )
+                    if repaired_clean:
+                        clean = repaired_clean
+                        # Keep meaningful original telemetry; only fill missing keys from repair.
+                        if isinstance(repaired_meta, dict):
+                            for key, value in repaired_meta.items():
+                                meta_data.setdefault(key, value)
+                        incomplete = False
+                    else:
+                        print(
+                            f"[Arena Turn Completion Guard] {speaker_name}: "
+                            f"{incomplete_reason}; {repair_error or 'repair unavailable'}"
+                        )
+
+                if incomplete:
+                    clean = (
+                        f"({speaker_name}'s response was interrupted before completion. "
+                        "The Arena has held the turn instead of handing an incomplete action to the other persona.)"
+                    )
+
+                # Cosmetic sanitation happens only AFTER completion testing so it cannot hide truncation.
+                if clean.endswith("--") or clean.endswith("-"):
+                    clean = clean.rstrip("-") + "..."
 
                 # Permadeath comes from structured semantic telemetry, not phrase matching.
                 fatal_this_turn = bool(meta_data.get("fatal", False))
@@ -1282,10 +1422,13 @@ class ControllerApp:
                             f"[WITNESS NOTIFICATION: {speaker_name} has died. React to the corpse and your survival.]"
                         )
                 else:
-                    last_exchange[0] = clean
+                    if not incomplete:
+                        last_exchange[0] = clean
 
                 is_empty = False
-                if not clean or "completed turn, but returned an empty response" in clean:
+                if incomplete:
+                    is_empty = True
+                elif not clean or "completed turn, but returned an empty response" in clean:
                     is_empty = True
                     empty_stall_count[speaker_sess.id] = empty_stall_count.get(speaker_sess.id, 0) + 1
                     

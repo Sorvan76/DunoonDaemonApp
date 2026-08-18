@@ -84,6 +84,12 @@ class ETOEngine:
         self.last_pressure = 0.0
         self.last_progress = 1.0
 
+        # Semantic progression memory. These fields deliberately track only broad
+        # causal momentum; Python does not try to parse distances, verbs or objects.
+        self.progress_debt = 0
+        self.low_progress_streak = 0
+        self.progression_history: List[str] = []
+
     # ------------------------------------------------------------------
     # AUTHORITATIVE NARRATIVE
     # ------------------------------------------------------------------
@@ -241,6 +247,27 @@ class ETOEngine:
         self.last_pressure = max(0.0, min(1.0, pressure))
         self.last_progress = max(0.0, min(1.0, progress))
 
+        # Accumulate resolution pressure when the model itself reports that turns are
+        # failing to materially advance the situation. This is intentionally semantic:
+        # no action/object vocabulary and no fake numerical physics.
+        if self.last_progress < 0.35:
+            self.low_progress_streak += 1
+            self.progress_debt = min(6, self.progress_debt + 1)
+        elif self.last_progress >= 0.65:
+            self.low_progress_streak = 0
+            self.progress_debt = max(0, self.progress_debt - 2)
+        else:
+            self.low_progress_streak = max(0, self.low_progress_streak - 1)
+            self.progress_debt = max(0, self.progress_debt - 1)
+
+        if user_text or assistant_text:
+            snapshot = (
+                f"turn={self.current_turn} progress={self.last_progress:.2f} "
+                f"pressure={self.last_pressure:.2f}"
+            )
+            self.progression_history.append(snapshot)
+            self.progression_history = self.progression_history[-6:]
+
         explicit_threat_floor = 0.65 if self.threat else 0.0
         structured_hazard_pressure = max(
             (h.severity for h in self.hazards if not h.resolved),
@@ -380,9 +407,34 @@ class ETOEngine:
 
             "12. EMBODIMENT: Maintain plausible reach, line of sight, movement, support and physical interaction, but avoid repetitive procedural "
             "body narration when nothing materially changes.",
+
+            "13. STATE PROGRESSION: Established actions and processes must change the world when they have a plausible opportunity to do so. "
+            "Do not restart an ongoing action from its original state on every turn. If movement, pursuit, opening, climbing, falling, damage, "
+            "consumption, escape, approach, retreat, recovery or any other process continues without an established interruption, reflect its "
+            "accumulated consequence in the next state.",
+
+            "14. MEASUREMENTS ARE SNAPSHOTS: A distance, position, amount, condition or relationship stated earlier describes that moment. "
+            "After a causal transition, do not keep reasserting the old measurement as though it were immutable. When exact recalculation is not "
+            "supported, use honest relational progression such as closer, farther, nearly there, within reach, reached, worsening, depleted or resolved "
+            "rather than inventing false precision.",
+
+            "15. RESOLVE MATURE ACTIONS: When an intended action has been repeatedly and successfully advanced, and no established obstacle prevents "
+            "completion, resolve it or produce its concrete consequence. Do not indefinitely narrate equivalent attempts merely to prolong the scene.",
+
+            "16. CAUSAL LEDGER: Before responding, compare the newest scene state with the immediately preceding one. Ask what materially changed because "
+            "of completed or ongoing actions, then continue from that changed state rather than from the original setup.",
         ])
 
         # Narrative authorship policy is injected independently by Overmind.
+
+        if self.progress_debt >= 2 or self.low_progress_streak >= 2:
+            lines.extend([
+                "\n[STATE RESOLUTION PRESSURE]",
+                f"Recent semantic telemetry indicates repeated weak progression (resolution pressure={self.progress_debt}).",
+                "Inspect the actual narrative rather than assuming a particular action. If an established action/process has had enough uninterrupted "
+                "opportunity to advance or complete, carry its consequences forward now. Do not repeat the same attempt from the same starting state. "
+                "If something genuinely prevents progress, make that established obstruction consequential instead of silently freezing the world."
+            ])
 
         if self.stagnation_turns >= 2 and self.stakes_level >= 0.6:
             lines.extend([
