@@ -175,7 +175,13 @@ class SessionManager:
             self._seed_default_companion()
             return
 
-        loaded_sessions = data.get("sessions", [])
+        if isinstance(data, list):
+            loaded_sessions = data
+        elif isinstance(data, dict):
+            loaded_sessions = data.get("sessions", [])
+        else:
+            loaded_sessions = []
+
         if not loaded_sessions:
             self._seed_default_companion()
             return
