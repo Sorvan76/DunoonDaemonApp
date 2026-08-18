@@ -1,0 +1,11 @@
+requests
+psutil
+pygame
+edge-tts
+pyttsx3
+sentence-transformers
+numpy
+Pillow
+pypdf
+python-docx
+faster-whisper

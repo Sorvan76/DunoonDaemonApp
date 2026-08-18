@@ -1,0 +1,13 @@
+﻿_internal/
+*.gguf
+*.bin
+*.zip
+*.tar.gz
+bin/*.exe
+bin/*.dll
+data/sessions/*/vaults/
+data/audio_cache/
+__pycache__/
+*.pyc
+custom_context.json
+last_dirs.json
