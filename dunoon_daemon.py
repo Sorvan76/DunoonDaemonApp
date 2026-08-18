@@ -61,6 +61,7 @@ from memory_validation import validate_memory
 from memory_integrity import check_memory_integrity
 from skin_manager import SKINS, apply_skin, load_skin, get_sorted_skin_names
 from overmind import overmind, build_overmind_packet
+from bridge import get_last_finish_reason, reset_last_finish_reason
 
 ensure_dirs()
 
@@ -511,6 +512,7 @@ class DunoonDaemonApp:
         self.continue_flash_job = None
         self.continue_flash_phase = 0
         self.empty_stall_count = 0
+        self.is_generating = False
 
         self.is_typewriting = False
         self.full_current_reply = ""
@@ -1137,9 +1139,9 @@ class DunoonDaemonApp:
             try:
                 controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
                 if controller and hasattr(controller, "brain") and controller.brain:
-                    reply = controller.brain.infer(poke_prompt, self.session)
+                    reply = controller.brain.infer(poke_prompt, self.session, source="internal_control")
                 else:
-                    reply = overmind(poke_prompt, self.session)
+                    reply = overmind(poke_prompt, self.session, source="internal_control")
             except Exception as e:
                 reply = f"({agent_display} tilts their head, waiting for you to lead.)"
 
@@ -1173,9 +1175,9 @@ class DunoonDaemonApp:
             try:
                 controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
                 if controller and hasattr(controller, "brain") and controller.brain:
-                    reply = controller.brain.infer(event_prompt, self.session)
+                    reply = controller.brain.infer(event_prompt, self.session, source="system_event")
                 else:
-                    reply = overmind(event_prompt, self.session)
+                    reply = overmind(event_prompt, self.session, source="system_event")
             except Exception as e:
                 reply = f"({agent_display} suddenly stops: An unexpected commotion echoes nearby!)"
 
@@ -1250,7 +1252,93 @@ class DunoonDaemonApp:
             self.thinking_job = None
         self.thinking_label.configure(text="")
 
+    def _release_generation_state(self):
+        """Release thinking/breathing/generation UI state after any worker exits."""
+        self.is_generating = False
+        try:
+            self._stop_thinking()
+        except Exception:
+            pass
+        try:
+            self.eyes.stop_breathing()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _turn_incomplete(raw_reply, clean_reply, finish_reason=None):
+        """Transport/syntax guard only; no story-specific vocabulary."""
+        raw = str(raw_reply or "")
+        clean = str(clean_reply or "").strip()
+        reason = str(finish_reason or "").strip().lower()
+
+        if reason in {"length", "max_tokens", "token_limit", "context_length"}:
+            return True, f"backend finish_reason={reason}"
+
+        meta_start = raw.lower().find("<!--meta:")
+        if meta_start != -1 and "-->" not in raw[meta_start:]:
+            return True, "unterminated telemetry envelope"
+
+        if not clean:
+            return True, "empty visible response"
+
+        if clean.count('"') % 2 != 0:
+            return True, "unclosed quotation"
+        if clean.count('*') % 2 != 0:
+            return True, "unclosed action/markdown delimiter"
+
+        terminal = clean.rstrip()
+        if len(terminal) >= 40 and terminal[-1] not in '.!?…”\'*)]}':
+            return True, "response ended without a closing boundary"
+
+        return False, ""
+
+    def _repair_interrupted_reply(self, original_prompt, raw_reply, clean_reply):
+        """One internal repair attempt; never recursive."""
+        visible_fragment = str(clean_reply or "").strip()
+        telemetry_only = visible_fragment.lower().startswith("<!--meta:") and "-->" not in visible_fragment
+
+        if not visible_fragment or telemetry_only:
+            repair_prompt = (
+                "[INTERNAL TURN REPAIR: The previous generation failed before producing a usable "
+                "visible response. Generate the intended response now from the same user prompt. "
+                "Do not mention this repair instruction or the failure.]\n\n"
+                f"[ORIGINAL USER PROMPT]\n{original_prompt}"
+            )
+        else:
+            repair_prompt = (
+                "[INTERNAL TURN REPAIR: Your previous generation ended before the response was complete. "
+                "Continue directly from the exact interruption point. Do not restart, recap, repeat, or "
+                "alter text already produced. Return only the continuation.]\n\n"
+                f"[INTERRUPTED RESPONSE]\n{visible_fragment}"
+            )
+
+        reset_last_finish_reason()
+        try:
+            controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
+            if controller and hasattr(controller, "brain") and controller.brain:
+                repaired_raw = controller.brain.infer(repair_prompt, self.session, source="internal_control")
+            else:
+                repaired_raw = overmind(repair_prompt, self.session, source="internal_control")
+        except Exception as e:
+            return None, f"repair inference failed: {e}"
+
+        _, repaired_clean = _extract_dual_channel_meta(str(repaired_raw))
+        repaired_reason = get_last_finish_reason()
+        still_bad, why = self._turn_incomplete(repaired_raw, repaired_clean, repaired_reason)
+        if still_bad:
+            return None, f"repair also incomplete: {why}"
+
+        base = visible_fragment
+        if base.lower().startswith("<!--meta:") and "-->" not in base:
+            base = ""
+        continuation = repaired_clean.lstrip()
+        combined = (base.rstrip() + " " + continuation).strip() if base else continuation
+        return combined, None
+
     def send_message(self, event=None):
+        if self.is_generating:
+            return
+        self.is_generating = True
         self._stop_continue_flash()
         
         if hasattr(self, "tts"):
@@ -1260,11 +1348,13 @@ class DunoonDaemonApp:
         attached_path = self.staged_file
 
         if not user_text and not attached_path:
+            self.is_generating = False
             return
 
         if user_text.startswith("/"):
             self.entry.delete(0, tk.END)
             self._handle_slash_command(user_text)
+            self.is_generating = False
             return
 
         if self.emoji_picker is not None and self.emoji_picker.winfo_exists():
@@ -1298,76 +1388,111 @@ class DunoonDaemonApp:
         self.eyes.start_breathing()
 
         def worker():
-            agent_display = getattr(self.session, "agent_name", "Kylo")
-            user_record = user_text
-
+            reset_last_finish_reason()
             try:
-                if attached_path:
-                    lower_p = attached_path.lower()
-                    fname = os.path.basename(attached_path)
+                agent_display = getattr(self.session, "agent_name", "Kylo")
+                user_record = user_text
 
-                    if lower_p.endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')):
-                        endpoint = self.get_active_endpoint()
-                        context_directive = user_text if user_text else "Inspect and react to the attached image in character."
-                        packet_user = f"{context_directive}\n\n[Attached Image: {fname}]"
-                        packet = build_overmind_packet(
-                            packet_user,
-                            self.session,
-                            source="user"
-                        )
-                        user_record = f"[Attached Image: {fname}] {user_text}".strip()
-                        route_memory(user_record, session=self.session, is_user=True)
-                        self.eyes.trigger_working()
-                        reply = send_multimodal_message(
-                            context_directive,
-                            file_path=attached_path,
-                            endpoint=endpoint,
-                            system_prompt=packet["system"],
-                            history=packet["history"],
-                        )
-                        # Direct vision transport bypasses overmind() generation, so mirror
-                        # its post-turn structured lifecycle explicitly.
-                        try:
-                            from overmind import get_session_eto, state_engine
-                            if getattr(self.session, "eto_enabled", True):
-                                get_session_eto(self.session).analyze_and_update(packet_user, reply)
-                            if state_engine and reply and not str(reply).startswith("("):
-                                state_engine.evaluate_turn_heuristics(packet_user, reply)
-                        except Exception as lifecycle_error:
-                            print(f"[Multimodal Lifecycle Warning]: {lifecycle_error}")
+                try:
+                    if attached_path:
+                        lower_p = attached_path.lower()
+                        fname = os.path.basename(attached_path)
+
+                        if lower_p.endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')):
+                            endpoint = self.get_active_endpoint()
+                            context_directive = user_text if user_text else "Inspect and react to the attached image in character."
+                            packet_user = f"{context_directive}\n\n[Attached Image: {fname}]"
+                            packet = build_overmind_packet(
+                                packet_user,
+                                self.session,
+                                source="user"
+                            )
+                            user_record = f"[Attached Image: {fname}] {user_text}".strip()
+                            route_memory(user_record, session=self.session, is_user=True)
+                            self.eyes.trigger_working()
+                            reply = send_multimodal_message(
+                                context_directive,
+                                file_path=attached_path,
+                                endpoint=endpoint,
+                                system_prompt=packet["system"],
+                                history=packet["history"],
+                            )
+                            # Direct vision transport bypasses overmind() generation, so mirror
+                            # its post-turn structured lifecycle explicitly.
+                            try:
+                                from overmind import get_session_eto, state_engine
+                                if getattr(self.session, "eto_enabled", True):
+                                    get_session_eto(self.session).analyze_and_update(packet_user, reply)
+                                if state_engine and reply and not str(reply).startswith("("):
+                                    state_engine.evaluate_turn_heuristics(packet_user, reply)
+                            except Exception as lifecycle_error:
+                                print(f"[Multimodal Lifecycle Warning]: {lifecycle_error}")
+                        else:
+                            parsed = self.file_processor.process_file(attached_path)
+                            content = parsed.get("content", "")
+                            combined_text = f"{user_text}\n\n{content}" if user_text else content
+                            user_record = f"[Attached File: {fname}] {user_text}".strip()
+
+                            route_memory(combined_text, session=self.session, is_user=True)
+                            self.eyes.trigger_working()
+
+                            controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
+                            if controller and hasattr(controller, "brain") and controller.brain:
+                                reply = controller.brain.infer(combined_text, self.session, source="user")
+                            else:
+                                reply = overmind(combined_text, self.session, source="user")
                     else:
-                        parsed = self.file_processor.process_file(attached_path)
-                        content = parsed.get("content", "")
-                        combined_text = f"{user_text}\n\n{content}" if user_text else content
-                        user_record = f"[Attached File: {fname}] {user_text}".strip()
-
-                        route_memory(combined_text, session=self.session, is_user=True)
+                        route_memory(user_text, session=self.session, is_user=True)
                         self.eyes.trigger_working()
 
                         controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
                         if controller and hasattr(controller, "brain") and controller.brain:
-                            reply = controller.brain.infer(combined_text, self.session, source="user")
+                            reply = controller.brain.infer(user_text, self.session, source="user")
                         else:
-                            reply = overmind(combined_text, self.session, source="user")
-                else:
-                    route_memory(user_text, session=self.session, is_user=True)
-                    self.eyes.trigger_working()
+                            reply = overmind(user_text, self.session, source="user")
 
-                    controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
-                    if controller and hasattr(controller, "brain") and controller.brain:
-                        reply = controller.brain.infer(user_text, self.session, source="user")
-                    else:
-                        reply = overmind(user_text, self.session, source="user")
+                    # Persist the genuine user turn exactly once, after inference so it is not
+                    # duplicated as both history and the current model input.
+                    if user_record:
+                        self._persist_session("user", user_record)
 
-                # Persist the genuine user turn exactly once, after inference so it is not
-                # duplicated as both history and the current model input.
-                if user_record:
-                    self._persist_session("user", user_record)
+                except Exception as e:
+                    reply = f"(Error talking to {agent_display}: {e})"
 
-            except Exception as e:
-                reply = f"(Error talking to {agent_display}: {e})"
+                try:
+                    finish_reason = get_last_finish_reason()
+                    _, clean_probe = _extract_dual_channel_meta(str(reply))
+                    incomplete, why = self._turn_incomplete(reply, clean_probe, finish_reason)
 
-            self.root.after(0, lambda: self._deliver_reply(reply))
+                    if incomplete:
+                        repaired, repair_error = self._repair_interrupted_reply(
+                            user_text if user_text else f"[Attached input: {os.path.basename(attached_path) if attached_path else 'unknown'}]",
+                            reply,
+                            clean_probe
+                        )
+                        if repaired:
+                            reply = repaired
+                        else:
+                            reply = (
+                                f"({agent_display}'s response was interrupted before completion. "
+                                "No in-world action was invented; press Continue to retry.)"
+                            )
+                            print(f"[Solo Turn Completion Guard] {agent_display}: {why}; {repair_error or 'repair unavailable'}")
+
+                    self.root.after(0, lambda: self._deliver_reply(reply))
+                except Exception as guard_error:
+                    print(f"[Solo Turn Guard Error]: {guard_error}")
+                    fallback = (
+                        f"({agent_display}'s response could not be completed safely. "
+                        "Press Continue to retry.)"
+                    )
+                    self.root.after(0, lambda: self._deliver_reply(fallback))
+            finally:
+                try:
+                    self.root.after(0, self._release_generation_state)
+                except Exception:
+                    self.is_generating = False
+
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1656,6 +1781,9 @@ class DunoonDaemonApp:
         self.idle_reset_job = self.root.after(3000, self._force_idle)
 
     def _force_continue(self, prompt="Please continue."):
+        if self.is_generating:
+            return
+        self.is_generating = True
         self._stop_continue_flash()
         if hasattr(self, "tts"):
             self.tts.stop(fade_ms=350)
@@ -1666,22 +1794,43 @@ class DunoonDaemonApp:
         self.eyes.start_breathing()
 
         def worker():
-            agent_display = getattr(self.session, "agent_name", "Kylo")
+            reset_last_finish_reason()
             try:
-                route_memory(prompt, session=self.session, is_user=True)
-                self.eyes.trigger_working()
+                agent_display = getattr(self.session, "agent_name", "Kylo")
+                try:
+                    route_memory(prompt, session=self.session, is_user=True)
+                    self.eyes.trigger_working()
 
-                controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
-                if controller and hasattr(controller, "brain") and controller.brain:
-                    reply = controller.brain.infer(prompt, self.session, source="user")
-                else:
-                    reply = overmind(prompt, self.session, source="user")
+                    controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
+                    if controller and hasattr(controller, "brain") and controller.brain:
+                        reply = controller.brain.infer(prompt, self.session, source="user")
+                    else:
+                        reply = overmind(prompt, self.session, source="user")
 
-                self._persist_session("user", prompt)
-            except Exception as e:
-                reply = f"(Error talking to {agent_display}: {e})"
+                    self._persist_session("user", prompt)
+                except Exception as e:
+                    reply = f"(Error talking to {agent_display}: {e})"
 
-            self.root.after(0, lambda: self._deliver_reply(reply))
+                finish_reason = get_last_finish_reason()
+                _, clean_probe = _extract_dual_channel_meta(str(reply))
+                incomplete, why = self._turn_incomplete(reply, clean_probe, finish_reason)
+                if incomplete:
+                    repaired, repair_error = self._repair_interrupted_reply(prompt, reply, clean_probe)
+                    if repaired:
+                        reply = repaired
+                    else:
+                        reply = (
+                            f"({agent_display}'s continuation was interrupted before completion. "
+                            "Press Continue to retry.)"
+                        )
+                        print(f"[Solo Continue Guard] {agent_display}: {why}; {repair_error or 'repair unavailable'}")
+                self.root.after(0, lambda: self._deliver_reply(reply))
+            finally:
+                try:
+                    self.root.after(0, self._release_generation_state)
+                except Exception:
+                    self.is_generating = False
+
 
         threading.Thread(target=worker, daemon=True).start()
 

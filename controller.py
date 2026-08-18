@@ -1004,7 +1004,7 @@ class ControllerApp:
 
             return False, ""
 
-        def _repair_arena_turn(speaker_sess, speaker_name, target_name, raw_reply, clean_reply):
+        def _repair_arena_turn(speaker_sess, speaker_name, target_name, raw_reply, clean_reply, original_prompt, failure_reason):
             """
             Make ONE internal continuation attempt. The repair instruction is internal_control,
             so it cannot become authoritative world state.
@@ -1121,6 +1121,17 @@ class ControllerApp:
                 except Exception: pass
                 thinking_job[0] = None
             thinking_label.configure(text="")
+
+        def _release_arena_generation_state():
+            """Always release Arena thinking/generation flags after worker exit."""
+            try:
+                is_generating[0] = False
+            except Exception:
+                pass
+            try:
+                _stop_thinking()
+            except Exception:
+                pass
 
         canvas_frame = tk.Frame(dialog, padx=10, pady=6)
         canvas_frame.pack(fill=tk.BOTH, expand=True)
@@ -1339,125 +1350,132 @@ class ControllerApp:
                 )
 
             def worker():
-                reset_last_finish_reason()
                 try:
-                    if hasattr(self, "brain") and self.brain:
-                        reply = self.brain.infer(prompt, speaker_sess, source="arena_peer")
-                    else:
-                        from overmind import overmind
-                        reply = overmind(prompt, speaker_sess, source="arena_peer")
-                except Exception as e:
-                    reply = f"({speaker_name} pauses in contemplation: {e})"
+                    reset_last_finish_reason()
+                    try:
+                        if hasattr(self, "brain") and self.brain:
+                            reply = self.brain.infer(prompt, speaker_sess, source="arena_peer")
+                        else:
+                            from overmind import overmind
+                            reply = overmind(prompt, speaker_sess, source="arena_peer")
+                    except Exception as e:
+                        reply = f"({speaker_name} pauses in contemplation: {e})"
 
-                if is_closed[0]:
-                    is_generating[0] = False
-                    return
+                    if is_closed[0]:
+                        is_generating[0] = False
+                        return
 
-                finish_reason = get_last_finish_reason()
-                meta_data, clean = _extract_dual_channel_meta(str(reply))
-                clean = clean.strip()
+                    finish_reason = get_last_finish_reason()
+                    meta_data, clean = _extract_dual_channel_meta(str(reply))
+                    clean = clean.strip()
 
-                incomplete, incomplete_reason = _arena_turn_incomplete(
-                    reply,
-                    clean,
-                    finish_reason
-                )
-
-                if incomplete:
-                    repaired_clean, repaired_meta, repair_error = _repair_arena_turn(
-                        speaker_sess,
-                        speaker_name,
-                        target_name,
+                    incomplete, incomplete_reason = _arena_turn_incomplete(
                         reply,
                         clean,
-                        prompt,
-                        incomplete_reason
-                    )
-                    if repaired_clean:
-                        clean = repaired_clean
-                        # Keep meaningful original telemetry; only fill missing keys from repair.
-                        if isinstance(repaired_meta, dict):
-                            for key, value in repaired_meta.items():
-                                meta_data.setdefault(key, value)
-                        incomplete = False
-                    else:
-                        print(
-                            f"[Arena Turn Completion Guard] {speaker_name}: "
-                            f"{incomplete_reason}; {repair_error or 'repair unavailable'}"
-                        )
-
-                if incomplete:
-                    clean = (
-                        f"({speaker_name}'s response was interrupted before completion. "
-                        "The Arena has held the turn instead of handing an incomplete action to the other persona.)"
+                        finish_reason
                     )
 
-                # Cosmetic sanitation happens only AFTER completion testing so it cannot hide truncation.
-                if clean.endswith("--") or clean.endswith("-"):
-                    clean = clean.rstrip("-") + "..."
-
-                # Permadeath comes from structured semantic telemetry, not phrase matching.
-                fatal_this_turn = bool(meta_data.get("fatal", False))
-                if getattr(speaker_sess, "mortality_enabled", False) and fatal_this_turn:
-                    speaker_sess.is_deceased = True
-                    self.sm._save()
-
-                    if getattr(target_sess, "is_deceased", False):
-                        last_exchange[0] = (
-                            f"*{speaker_name} falls lifeless beside {target_name}.* "
-                            f"[MUTUAL ANNIHILATION: Both combatants have perished. The arena falls silent.]"
+                    if incomplete:
+                        repaired_clean, repaired_meta, repair_error = _repair_arena_turn(
+                            speaker_sess,
+                            speaker_name,
+                            target_name,
+                            reply,
+                            clean,
+                            prompt,
+                            incomplete_reason
                         )
-                    else:
-                        try:
-                            from memory_deep import save_deep_memory_journal
-                            save_deep_memory_journal(
-                                f"[WITNESSED COMBAT PERMADEATH]: {speaker_name} perished during the encounter.",
-                                session_id=target_sess.id
+                        if repaired_clean:
+                            clean = repaired_clean
+                            # Keep meaningful original telemetry; only fill missing keys from repair.
+                            if isinstance(repaired_meta, dict):
+                                for key, value in repaired_meta.items():
+                                    meta_data.setdefault(key, value)
+                            incomplete = False
+                        else:
+                            print(
+                                f"[Arena Turn Completion Guard] {speaker_name}: "
+                                f"{incomplete_reason}; {repair_error or 'repair unavailable'}"
                             )
-                        except Exception:
-                            pass
 
-                        last_exchange[0] = (
-                            f"*{speaker_name} collapses, lifeless on the ground.* "
-                            f"[WITNESS NOTIFICATION: {speaker_name} has died. React to the corpse and your survival.]"
+                    if incomplete:
+                        clean = (
+                            f"({speaker_name}'s response was interrupted before completion. "
+                            "The Arena has held the turn instead of handing an incomplete action to the other persona.)"
                         )
-                else:
-                    if not incomplete:
-                        last_exchange[0] = clean
 
-                is_empty = False
-                if incomplete:
-                    is_empty = True
-                elif not clean or "completed turn, but returned an empty response" in clean:
-                    is_empty = True
-                    empty_stall_count[speaker_sess.id] = empty_stall_count.get(speaker_sess.id, 0) + 1
+                    # Cosmetic sanitation happens only AFTER completion testing so it cannot hide truncation.
+                    if clean.endswith("--") or clean.endswith("-"):
+                        clean = clean.rstrip("-") + "..."
+
+                    # Permadeath comes from structured semantic telemetry, not phrase matching.
+                    fatal_this_turn = bool(meta_data.get("fatal", False))
+                    if getattr(speaker_sess, "mortality_enabled", False) and fatal_this_turn:
+                        speaker_sess.is_deceased = True
+                        self.sm._save()
+
+                        if getattr(target_sess, "is_deceased", False):
+                            last_exchange[0] = (
+                                f"*{speaker_name} falls lifeless beside {target_name}.* "
+                                f"[MUTUAL ANNIHILATION: Both combatants have perished. The arena falls silent.]"
+                            )
+                        else:
+                            try:
+                                from memory_deep import save_deep_memory_journal
+                                save_deep_memory_journal(
+                                    f"[WITNESSED COMBAT PERMADEATH]: {speaker_name} perished during the encounter.",
+                                    session_id=target_sess.id
+                                )
+                            except Exception:
+                                pass
+
+                            last_exchange[0] = (
+                                f"*{speaker_name} collapses, lifeless on the ground.* "
+                                f"[WITNESS NOTIFICATION: {speaker_name} has died. React to the corpse and your survival.]"
+                            )
+                    else:
+                        if not incomplete:
+                            last_exchange[0] = clean
+
+                    is_empty = False
+                    if incomplete:
+                        is_empty = True
+                    elif not clean or "completed turn, but returned an empty response" in clean:
+                        is_empty = True
+                        empty_stall_count[speaker_sess.id] = empty_stall_count.get(speaker_sess.id, 0) + 1
                     
-                    if empty_stall_count[speaker_sess.id] >= 2:
-                        clean = f"({speaker_name} returned no usable response; engine will retry this speaker without inventing an in-world action.)"
+                        if empty_stall_count[speaker_sess.id] >= 2:
+                            clean = f"({speaker_name} returned no usable response; engine will retry this speaker without inventing an in-world action.)"
+                            empty_stall_count[speaker_sess.id] = 0
+                        else:
+                            clean = f"({speaker_name} completed turn, but returned an empty response.)"
+                    else:
                         empty_stall_count[speaker_sess.id] = 0
-                    else:
-                        clean = f"({speaker_name} completed turn, but returned an empty response.)"
-                else:
-                    empty_stall_count[speaker_sess.id] = 0
 
-                if not force_same_speaker and not is_empty:
-                    active_turn[0] += 1
+                    if not force_same_speaker and not is_empty:
+                        active_turn[0] += 1
 
-                def ui_deliver():
-                    is_generating[0] = False
-                    if is_closed[0]: return
-                    _stop_thinking()
+                    def ui_deliver():
+                        is_generating[0] = False
+                        if is_closed[0]: return
+                        _stop_thinking()
                     
-                    if is_empty:
-                        _start_arena_continue_flash()
-                    else:
-                        _stop_arena_continue_flash()
+                        if is_empty:
+                            _start_arena_continue_flash()
+                        else:
+                            _stop_arena_continue_flash()
 
-                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    head_txt = f"[{timestamp}] {speaker_name}:\n"
-                    _type_out_arena(head_txt, clean, tag_head, tag_body)
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        head_txt = f"[{timestamp}] {speaker_name}:\n"
+                        _type_out_arena(head_txt, clean, tag_head, tag_body)
 
-                dialog.after(0, ui_deliver)
+                    dialog.after(0, ui_deliver)
+
+                finally:
+                    try:
+                        dialog.after(0, _release_arena_generation_state)
+                    except Exception:
+                        is_generating[0] = False
 
             threading.Thread(target=worker, daemon=True).start()
 
