@@ -86,11 +86,15 @@ def parse_model_b_parameter(model_identifier: str = "") -> int:
     return 31
 
 def get_dynamic_working_threshold(session) -> int:
-    model_name = getattr(session, "model_name", "") or getattr(session, "active_model", "")
+    model_name = (
+        getattr(session, "model_name", "")
+        or getattr(session, "active_model", "")
+        or os.path.basename(getattr(session, "model_path", "") or "")
+    )
     b_val = parse_model_b_parameter(model_name)
     return max(16, min(150, b_val * 2))
 
-def run_session_sleep_cycle(session, threshold: int = None):
+def run_session_sleep_cycle(session, threshold: int = None, model_handler=None):
     session_id = getattr(session, "id", None) or getattr(session, "session_id", None)
     if not session_id:
         return
@@ -118,7 +122,6 @@ def run_session_sleep_cycle(session, threshold: int = None):
         from overmind import neutral_summarize
         from memory_deep import save_deep_memory_journal
 
-        model_handler = getattr(getattr(session, "brain", None), "model_handler", None)
         summary = neutral_summarize(prompt, model_handler=model_handler)
 
         if summary and not summary.startswith("("):

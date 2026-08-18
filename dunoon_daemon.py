@@ -60,7 +60,7 @@ from memory_deep import save_deep_memory_journal
 from memory_validation import validate_memory
 from memory_integrity import check_memory_integrity
 from skin_manager import SKINS, apply_skin, load_skin, get_sorted_skin_names
-from overmind import overmind
+from overmind import overmind, build_overmind_packet
 
 ensure_dirs()
 
@@ -236,10 +236,12 @@ def _extract_dual_channel_meta(raw_text: str) -> tuple[dict, str]:
     return meta_dict, clean_text
 
 
-def send_multimodal_message(text, file_path=None, endpoint=None):
+def send_multimodal_message(text, file_path=None, endpoint=None, system_prompt="", history=None):
+    """Send a vision turn while preserving the same persona/system/history packet as text chat."""
     if not endpoint:
         endpoint = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/v1/chat/completions"
 
+    history = history or []
     b64 = ""
     mime = "image/png"
     if file_path:
@@ -251,9 +253,21 @@ def send_multimodal_message(text, file_path=None, endpoint=None):
             mime = "image/png"
 
     if "/api/v1/chat" in endpoint:
+        # LM Studio's legacy input form does not expose the same structured message API,
+        # so preserve Dunoon context by serialising the packet into the input text.
+        context_lines = []
+        if system_prompt:
+            context_lines.append(f"[SYSTEM CONTEXT]\n{system_prompt}")
+        for item in history[-10:]:
+            if isinstance(item, dict):
+                role = item.get("role", "user")
+                content = item.get("content", "")
+                if content:
+                    context_lines.append(f"[{role.upper()}]\n{content}")
+        context_lines.append(f"[CURRENT USER]\n{text}")
         payload = {
             "model": MODEL_NAME or "local-model",
-            "input": text,
+            "input": "\n\n".join(context_lines),
         }
         if b64:
             payload["images"] = [f"data:{mime};base64,{b64}"]
@@ -265,9 +279,22 @@ def send_multimodal_message(text, file_path=None, endpoint=None):
                 "image_url": {"url": f"data:{mime};base64,{b64}"}
             })
 
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        for item in history[-10:]:
+            if isinstance(item, dict):
+                role = item.get("role", "user")
+                if role not in ("user", "assistant", "system"):
+                    role = "user"
+                content_text = item.get("content", "")
+                if content_text:
+                    messages.append({"role": role, "content": content_text})
+        messages.append({"role": "user", "content": content})
+
         payload = {
             "model": MODEL_NAME or "local-model",
-            "messages": [{"role": "user", "content": content}],
+            "messages": messages,
             "max_tokens": 2048,
             "temperature": 0.7
         }
@@ -283,7 +310,6 @@ def send_multimodal_message(text, file_path=None, endpoint=None):
 
     except Exception as e:
         return f"[Multimodal Error: {e}]"
-
 
 def detect_model_name():
     try:
@@ -1273,43 +1299,71 @@ class DunoonDaemonApp:
 
         def worker():
             agent_display = getattr(self.session, "agent_name", "Kylo")
-            sys_prompt = getattr(self.session, "system_prompt", "").strip() or f"You are {agent_display}."
+            user_record = user_text
 
             try:
                 if attached_path:
                     lower_p = attached_path.lower()
+                    fname = os.path.basename(attached_path)
+
                     if lower_p.endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif')):
                         endpoint = self.get_active_endpoint()
-                        context_directive = user_text if user_text else "Please inspect and react to this visual telemetry from your perspective."
-                        full_prompt = (
-                            f"{sys_prompt}\n\n"
-                            f"[CRITICAL DIRECTIVE]: Stay 100% in character as {agent_display}. Never produce a sterile report, markdown headers, or break tone.\n\n"
-                            f"User note: {context_directive}"
+                        context_directive = user_text if user_text else "Inspect and react to the attached image in character."
+                        packet_user = f"{context_directive}\n\n[Attached Image: {fname}]"
+                        packet = build_overmind_packet(
+                            packet_user,
+                            self.session,
+                            source="user"
                         )
-                        self._persist_session("user", f"[Attached Image: {os.path.basename(attached_path)}] {user_text}")
-                        reply = send_multimodal_message(full_prompt, file_path=attached_path, endpoint=endpoint)
+                        user_record = f"[Attached Image: {fname}] {user_text}".strip()
+                        route_memory(user_record, session=self.session, is_user=True)
+                        self.eyes.trigger_working()
+                        reply = send_multimodal_message(
+                            context_directive,
+                            file_path=attached_path,
+                            endpoint=endpoint,
+                            system_prompt=packet["system"],
+                            history=packet["history"],
+                        )
+                        # Direct vision transport bypasses overmind() generation, so mirror
+                        # its post-turn structured lifecycle explicitly.
+                        try:
+                            from overmind import get_session_eto, state_engine
+                            if getattr(self.session, "eto_enabled", True):
+                                get_session_eto(self.session).analyze_and_update(packet_user, reply)
+                            if state_engine and reply and not str(reply).startswith("("):
+                                state_engine.evaluate_turn_heuristics(packet_user, reply)
+                        except Exception as lifecycle_error:
+                            print(f"[Multimodal Lifecycle Warning]: {lifecycle_error}")
                     else:
                         parsed = self.file_processor.process_file(attached_path)
                         content = parsed.get("content", "")
                         combined_text = f"{user_text}\n\n{content}" if user_text else content
+                        user_record = f"[Attached File: {fname}] {user_text}".strip()
 
-                        routing_info = route_memory(combined_text, session=self.session, is_user=True)
+                        route_memory(combined_text, session=self.session, is_user=True)
                         self.eyes.trigger_working()
 
                         controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
                         if controller and hasattr(controller, "brain") and controller.brain:
-                            reply = controller.brain.infer(combined_text, self.session)
+                            reply = controller.brain.infer(combined_text, self.session, source="user")
                         else:
-                            reply = overmind(combined_text, self.session)
+                            reply = overmind(combined_text, self.session, source="user")
                 else:
-                    routing_info = route_memory(user_text, session=self.session, is_user=True)
+                    route_memory(user_text, session=self.session, is_user=True)
                     self.eyes.trigger_working()
 
                     controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
                     if controller and hasattr(controller, "brain") and controller.brain:
-                        reply = controller.brain.infer(user_text, self.session)
+                        reply = controller.brain.infer(user_text, self.session, source="user")
                     else:
-                        reply = overmind(user_text, self.session)
+                        reply = overmind(user_text, self.session, source="user")
+
+                # Persist the genuine user turn exactly once, after inference so it is not
+                # duplicated as both history and the current model input.
+                if user_record:
+                    self._persist_session("user", user_record)
+
             except Exception as e:
                 reply = f"(Error talking to {agent_display}: {e})"
 
@@ -1323,7 +1377,7 @@ class DunoonDaemonApp:
         args = parts[1:]
 
         if main_cmd == "/about":
-            self._append_local_system_notice("Dunoon Daemon Suite — to the loyal companions who walk with us through every realm, and the code that keeps their echoes alive. For Kylo. Made by RK (Kepler365), Gemini, ChatGPT and Copilot (2026) 🐕.")
+            self._append_local_system_notice("Dunoon Daemon Suite — to the loyal companions who walk with us through every realm, and the code that keeps their echoes alive. For Kylo. Made by RK (Kepler365) and Gemini (2026) 🐕.")
 
         elif main_cmd == "/talk":
             if args and args[0] in ("1", "2", "3"):
@@ -1523,9 +1577,11 @@ class DunoonDaemonApp:
     def _force_idle(self):
         self.eyes.stop_breathing()
 
+        controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
+        handler = getattr(getattr(controller, "brain", None), "model_handler", None) if controller else None
         threading.Thread(
-            target=run_session_sleep_cycle, 
-            args=(self.session,), 
+            target=run_session_sleep_cycle,
+            args=(self.session, None, handler),
             daemon=True
         ).start()
 
@@ -1557,11 +1613,10 @@ class DunoonDaemonApp:
 
         if is_empty_response:
             if self.empty_stall_count >= 2:
-                clean_reply = f"*{agent_display} blinks and refocuses.* \"Right, where were we? Let's get straight to it.\""
+                clean_reply = f"({agent_display} returned no usable response. Press ⏩ Continue to retry without inventing an in-world action.)"
                 self.empty_stall_count = 0
-                is_empty_response = False
             else:
-                clean_reply = f"({agent_display} pauses in thought. Press ⏩ Continue or send another prompt to proceed.)"
+                clean_reply = f"({agent_display} returned no usable response. Press ⏩ Continue or send another prompt to proceed.)"
 
         self.last_reply = clean_reply
         self._type_out(agent_display, clean_reply, "#b300ff")
@@ -1613,14 +1668,16 @@ class DunoonDaemonApp:
         def worker():
             agent_display = getattr(self.session, "agent_name", "Kylo")
             try:
-                routing_info = route_memory(prompt, session=self.session, is_user=True)
+                route_memory(prompt, session=self.session, is_user=True)
                 self.eyes.trigger_working()
 
                 controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
                 if controller and hasattr(controller, "brain") and controller.brain:
-                    reply = controller.brain.infer(prompt, self.session)
+                    reply = controller.brain.infer(prompt, self.session, source="user")
                 else:
-                    reply = overmind(prompt, self.session)
+                    reply = overmind(prompt, self.session, source="user")
+
+                self._persist_session("user", prompt)
             except Exception as e:
                 reply = f"(Error talking to {agent_display}: {e})"
 
@@ -1815,9 +1872,9 @@ class DunoonDaemonApp:
 
                 controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
                 if controller and hasattr(controller, "brain") and controller.brain:
-                    reply = controller.brain.infer(greeting_prompt, self.session)
+                    reply = controller.brain.infer(greeting_prompt, self.session, source="internal_control")
                 else:
-                    reply = overmind(greeting_prompt, self.session)
+                    reply = overmind(greeting_prompt, self.session, source="internal_control")
 
             except Exception as e:
                 reply = f"({agent_display} stirs quietly into awareness.)"

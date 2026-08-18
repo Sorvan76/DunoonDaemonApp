@@ -1225,7 +1225,8 @@ class ControllerApp:
             if force_same_speaker:
                 prompt = (
                     f"[SCENE DIRECTIVE: Continue your previous thought without repeating yourself. "
-                    f"Address {target_name} directly by name as {speaker_name}.]"
+                    f"Address {target_name} directly by name as {speaker_name}.]\n\n"
+                    f"[YOUR PREVIOUS RESPONSE]\n{base_prompt}"
                 )
             else:
                 prompt = (
@@ -1237,10 +1238,10 @@ class ControllerApp:
             def worker():
                 try:
                     if hasattr(self, "brain") and self.brain:
-                        reply = self.brain.infer(prompt, speaker_sess)
+                        reply = self.brain.infer(prompt, speaker_sess, source="arena_peer")
                     else:
                         from overmind import overmind
-                        reply = overmind(prompt, speaker_sess)
+                        reply = overmind(prompt, speaker_sess, source="arena_peer")
                 except Exception as e:
                     reply = f"({speaker_name} pauses in contemplation: {e})"
 
@@ -1336,10 +1337,10 @@ class ControllerApp:
             def worker():
                 try:
                     if hasattr(self, "brain") and self.brain:
-                        reply = self.brain.infer(event_prompt, s1)
+                        reply = self.brain.infer(event_prompt, s1, source="internal_control")
                     else:
                         from overmind import overmind
-                        reply = overmind(event_prompt, s1)
+                        reply = overmind(event_prompt, s1, source="internal_control")
                 except Exception as e:
                     reply = f"⚡ A sudden, violent shockwave rattles the arena grounds between {n1} and {n2}!"
 
@@ -1351,6 +1352,18 @@ class ControllerApp:
                     clean = f"⚡ A sudden blinding flash tears across the sky, shaking the ground between {n1} and {n2}!"
 
                 last_exchange[0] = f"[💥 Live Event]: {clean}"
+
+                # A live event is shared world authority for BOTH participants.
+                try:
+                    from overmind import get_session_eto
+                    for arena_sess in (s1, s2):
+                        if getattr(arena_sess, "eto_enabled", True):
+                            get_session_eto(arena_sess).observe_narrative_input(
+                                f"[Live Event]: {clean}",
+                                authoritative=True
+                            )
+                except Exception as e:
+                    print(f"[Arena Event Authority Warning]: {e}")
 
                 def ui_deliver():
                     _stop_thinking()
@@ -1389,6 +1402,19 @@ class ControllerApp:
                 intervene_payload += f"\n\n[Artifact Data]: {parsed.get('content', '')[:3000]}"
 
             last_exchange[0] = intervene_payload
+
+            # User interventions establish the same authoritative reality for both agents.
+            try:
+                from overmind import get_session_eto
+                for arena_sess in arena_sessions_tuple:
+                    if getattr(arena_sess, "eto_enabled", True):
+                        get_session_eto(arena_sess).observe_narrative_input(
+                            intervene_payload,
+                            authoritative=True
+                        )
+            except Exception as e:
+                print(f"[Arena Intervention Authority Warning]: {e}")
+
             step_turn()
 
         entry_intervene.bind("<Return>", trigger_intervention)
@@ -1697,22 +1723,32 @@ class ControllerApp:
     def execute_master_purge(self):
         confirm = messagebox.askyesno(
             "⚠️ MASTER PURGE WARNING",
-            "Are you sure you want to completely clear ALL memory files and session vaults across ALL personas?\n\n"
-            "This will reset all character histories to blank slates. This action CANNOT be undone!",
+            "Are you sure you want to completely clear ALL conversation history, memory vaults, "
+            "scene state, and cached continuity across ALL personas?\n\n"
+            "Persona definitions and personality settings will be preserved, but every companion "
+            "will wake with a blank memory. This action CANNOT be undone!",
             icon=messagebox.WARNING
         )
         if not confirm:
             return
 
         try:
-            purged_count = 0
+            purged_targets = 0
+            reset_sessions = 0
 
-            if os.path.exists(SESSIONS_DIR):
-                for folder in os.listdir(SESSIONS_DIR):
-                    folder_path = os.path.join(SESSIONS_DIR, folder)
-                    if os.path.isdir(folder_path):
-                        shutil.rmtree(folder_path)
-                        purged_count += 1
+            # 1. Stop live UI surfaces FIRST so an open chat/Arena cannot write stale
+            #    pre-purge history back to disk after the purge completes.
+            arena = getattr(self, "active_arena_instance", None)
+            if arena:
+                try:
+                    arena_dialog = arena.get("dialog") if isinstance(arena, dict) else None
+                    if arena_dialog is not None and arena_dialog.winfo_exists():
+                        arena_dialog.destroy()
+                except Exception:
+                    pass
+                self.active_arena_instance = None
+
+            self.arena_active_sessions.clear()
 
             for session_id, app_instance in list(self.active_chat_apps.items()):
                 try:
@@ -1722,11 +1758,99 @@ class ControllerApp:
                     pass
             self.active_chat_apps.clear()
 
+            # 2. Clear the IN-MEMORY session histories and transient scene state.
+            #    This is the bit the old purge missed: deleting vault folders alone
+            #    left session.messages intact, and _save() could simply write the old
+            #    conversation straight back into sessions.json.
+            sessions = list(getattr(self.sm, "sessions", {}).values())
+            for session in sessions:
+                try:
+                    session.messages = []
+                    session.append_system("New session initialized.")
+
+                    # Reset conversation-derived state, while preserving the actual persona:
+                    # name, system prompt, OCEAN profile, backstory, physiology, powers,
+                    # sharing/privacy options, ETO/mortality/narrative settings, backend/model.
+                    session.primacy_count = 0
+                    session.is_deceased = False
+                    session.location = ""
+                    session.threat = ""
+                    session.opportunity = ""
+                    reset_sessions += 1
+                except Exception as e:
+                    print(f"[Master Purge Session Reset Warning] {getattr(session, 'id', '?')}: {e}")
+
+            # 3. Delete every per-session storage directory. sessions.json itself is a
+            #    registry, not a vault, so it is intentionally preserved/re-written below.
+            if os.path.exists(SESSIONS_DIR):
+                for entry in os.listdir(SESSIONS_DIR):
+                    entry_path = os.path.join(SESSIONS_DIR, entry)
+                    if os.path.isdir(entry_path):
+                        try:
+                            shutil.rmtree(entry_path)
+                            purged_targets += 1
+                        except Exception as e:
+                            print(f"[Master Purge Vault Warning] {entry_path}: {e}")
+
+            # 4. Clear process-local semantic/continuity caches so old scene anchors,
+            #    novelty trajectories, or remembered state cannot survive merely because
+            #    Python itself is still running.
+            try:
+                import overmind as _overmind
+                cache = getattr(_overmind, "_SESSION_ETO_CACHE", None)
+                if isinstance(cache, dict):
+                    cache.clear()
+            except Exception as e:
+                print(f"[Master Purge ETO Cache Warning]: {e}")
+
+            try:
+                import significance as _significance
+                trajectories = getattr(_significance, "_trajectory_vectors", None)
+                if isinstance(trajectories, dict):
+                    trajectories.clear()
+            except Exception as e:
+                print(f"[Master Purge Significance Cache Warning]: {e}")
+
+            # 5. Clear legacy/global fallback vaults too. They live outside SESSIONS_DIR
+            #    and can otherwise survive a "master" purge.
+            try:
+                import config as _config
+                global_vault_dir = getattr(_config, "VAULTS_DIR", None)
+                if global_vault_dir and os.path.isdir(global_vault_dir):
+                    for entry in os.listdir(global_vault_dir):
+                        entry_path = os.path.join(global_vault_dir, entry)
+                        try:
+                            if os.path.isdir(entry_path):
+                                shutil.rmtree(entry_path)
+                            else:
+                                os.remove(entry_path)
+                            purged_targets += 1
+                        except Exception as e:
+                            print(f"[Master Purge Global Vault Warning] {entry_path}: {e}")
+            except Exception as e:
+                print(f"[Master Purge Global Vault Root Warning]: {e}")
+
+            # Reset the process-local mutable state engine after deleting state_matrix.json.
+            try:
+                import overmind as _overmind
+                state_engine = getattr(_overmind, "state_engine", None)
+                if state_engine is not None:
+                    state_engine.state = {}
+            except Exception as e:
+                print(f"[Master Purge State Engine Warning]: {e}")
+
+            # 6. Persist the freshly blank histories. This overwrites sessions.json with
+            #    the same personas/settings but no previous conversation transcript.
+            if hasattr(self.sm, "_save"):
+                self.sm._save()
+
             self._refresh_sessions()
 
             messagebox.showinfo(
                 "Master Purge Complete",
-                f"Successfully reset {purged_count} storage targets. All persona memory vaults are now clean slates."
+                f"Reset {reset_sessions} persona session(s) and removed {purged_targets} session vault folder(s).\n\n"
+                "Persona definitions were preserved. Conversation history, vault memory, scene state, "
+                "and live continuity caches have been cleared."
             )
 
         except Exception as e:

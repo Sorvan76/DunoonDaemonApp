@@ -49,14 +49,6 @@ VAULT_PATHS = {
     "deep": DEEP_MEMORY_FILE,
 }
 
-_PROFILE_VECTORS = None
-
-def _get_profile_vectors():
-    global _PROFILE_VECTORS
-    if _PROFILE_VECTORS is None:
-        _PROFILE_VECTORS = {vault: [embed(p) for p in profile] for vault, profile in VAULT_PROFILES.items()}
-    return _PROFILE_VECTORS
-
 _VAULT_VECTOR_CACHE = {}
 
 def _definition_vector(vault_name):

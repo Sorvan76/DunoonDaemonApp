@@ -15,19 +15,19 @@ class Brain:
     def __init__(self, model_handler=None):
         self.model_handler = model_handler
 
-    def infer(self, user_text: str, session) -> str:
-        return overmind(user_text, session, model_handler=self.model_handler)
+    def infer(self, user_text: str, session, source: str = "user") -> str:
+        return overmind(user_text, session, model_handler=self.model_handler, source=source)
 
     # ------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------
 
-    def ask(self, user_text: str, session) -> str:
+    def ask(self, user_text: str, session, source: str = "user") -> str:
         """
         Unified inference entry point.
         Uses Overmind for cognitive fusion and the model handler for inference.
         """
-        return overmind(user_text, session, model_handler=self.model_handler)
+        return overmind(user_text, session, model_handler=self.model_handler, source=source)
 
     # ------------------------------------------------------------
     # CPU Affinity

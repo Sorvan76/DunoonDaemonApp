@@ -95,7 +95,33 @@ def get_session_eto(session) -> ETOEngine:
 
 state_engine = SyntheticStateEngine()
 
-def build_overmind_packet(user_text: str, session, state_engine=None):
+def format_narrative_authority_directive(session) -> str:
+    """Per-persona authorship policy. Always active, even when ETO is disabled."""
+    collaborative = bool(getattr(session, "narrative_freedom", False)) if session else False
+    if collaborative:
+        return (
+            "[COLLABORATIVE WORLDBUILDING: ENABLED]\n"
+            "You may reasonably fill genuine narrative gaps with new external details, discoveries, "
+            "document contents, background facts, complications, locations, NPC actions, or plot "
+            "developments when they naturally grow from the established scene.\n"
+            "This is collaborative authorship, not unlimited control. Never contradict authoritative "
+            "facts, erase established consequences, invent convenient unsupported powers/resources, "
+            "or dictate another participant's private thoughts, choices, speech, or reactions."
+        )
+    return (
+        "[NARRATIVE AUTHORITY: USER-LED]\n"
+        "Control your own speech, thoughts, emotions, decisions, and voluntary actions freely, but "
+        "do not turn consequential unknown external facts into established reality merely to keep "
+        "the story moving.\n"
+        "Unseen or unread information, unspecified document contents, hidden history, major off-screen "
+        "events, new threats/resources, new locations/routes, NPC decisions, and plot-changing "
+        "discoveries remain unknown until established by the user/system.\n"
+        "You may make clearly uncertain guesses, suspicions, questions, and interpretations. Minor "
+        "non-consequential descriptive texture is allowed when it does not create new plot obligations."
+    )
+
+def build_overmind_packet(user_text: str, session, state_engine=None, source: str = "user"):
+
     if session:
         if apply_daily_mood_variance(session):
             if hasattr(session, "session_manager") and session.session_manager:
@@ -142,21 +168,17 @@ def build_overmind_packet(user_text: str, session, state_engine=None):
         if state_directive:
             system_prompt_parts.append(state_directive)
 
+    narrative_directive = format_narrative_authority_directive(session)
+    if narrative_directive:
+        system_prompt_parts.append(narrative_directive)
+
     # Inject ETO Anti-Hallucination, Physiology & Powers Grounding Block
     if session and getattr(session, "eto_enabled", True):
         eto_inst = get_session_eto(session)
 
-        # Ordinary companion input is authoritative by default.
-        # Arena autonomous peer turns are wrapped in [SCENE DIRECTIVE: ...] and therefore
-        # remain recent narrative rather than world authority. Explicit user interventions
-        # and deliberate live-event injections remain authoritative.
-        low_input = (user_text or "").lower()
-        is_arena_peer_turn = "[scene directive:" in low_input
-        is_explicit_intervention = "[user intervention]" in low_input
-        is_live_event = "[live event]" in low_input or "[💥 live event]" in low_input
-        source_is_authoritative = (
-            (not is_arena_peer_turn) or is_explicit_intervention or is_live_event
-        )
+        # Source authority is explicit; no prompt-word guessing.
+        source_key = (source or "user").strip().lower()
+        source_is_authoritative = source_key in {"user", "live_event", "system_event"}
         eto_inst.observe_narrative_input(user_text, authoritative=source_is_authoritative)
 
         mortality_on = getattr(session, "mortality_enabled", False)
@@ -164,8 +186,6 @@ def build_overmind_packet(user_text: str, session, state_engine=None):
         backstory_txt = getattr(session, "backstory", "") or ""
         phys_txt = getattr(session, "physiology", "") or "Normal (Standard Organic humanoid)"
         powers_txt = getattr(session, "powers", "") or "None (Standard human baseline capabilities)"
-        narrative_freedom = bool(getattr(session, "narrative_freedom", False))
-
         recent_corpus = " ".join([m.get("content", "") for m in history[-4:]]) + f" {user_text}"
 
         eto_block = eto_inst.format_directive(
@@ -174,8 +194,7 @@ def build_overmind_packet(user_text: str, session, state_engine=None):
             backstory=backstory_txt,
             physiology=phys_txt,
             powers=powers_txt,
-            recent_context=recent_corpus,
-            narrative_freedom=narrative_freedom
+            recent_context=recent_corpus
         )
         if eto_block:
             system_prompt_parts.append(eto_block)
@@ -222,8 +241,8 @@ def neutral_summarize(text: str, model_handler=None) -> str:
         traceback.print_exc()
         return f"(API Error: {e})"
 
-def overmind(user_text: str, session=None, model_handler=None):
-    packet = build_overmind_packet(user_text, session, state_engine=state_engine)
+def overmind(user_text: str, session=None, model_handler=None, source: str = "user"):
+    packet = build_overmind_packet(user_text, session, state_engine=state_engine, source=source)
     reply = ""
 
     # 1. Route to Native C++ model_handler if loaded & active

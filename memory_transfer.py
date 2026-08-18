@@ -53,4 +53,11 @@ def retrieve_cross_persona_insights(query: str, current_session, sm, top_k: int 
     matches = semantic_search(query, unique_memories, top_k=top_k)
     
     # 5. Format as injected system cues
-    return [f"[Recovered System Insight]: {m}" for m in matches if m]
+    formatted = []
+    for m in matches:
+        if not m:
+            continue
+        sources = sorted(provenance.get(m, {"Unknown persona"}))
+        source_label = ", ".join(sources)
+        formatted.append(f"[Cross-Persona Insight — source: {source_label}; second-hand]: {m}")
+    return formatted

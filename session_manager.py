@@ -2,6 +2,7 @@
 import os
 import json
 import uuid
+import shutil
 from datetime import datetime, timezone
 from character import create_ocean_profile
 from config import SESSIONS_FILE, ensure_dirs
@@ -169,14 +170,27 @@ class SessionManager:
             self._seed_default_companion()
             return
 
-        try:
-            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
-                raw = f.read().strip()
+        data = None
+        load_error = None
+        for candidate in (SESSIONS_FILE, f"{SESSIONS_FILE}.bak"):
+            if not os.path.exists(candidate):
+                continue
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    raw = f.read().strip()
                 if not raw:
-                    self._seed_default_companion()
-                    return
-                data = json.loads(raw)
-        except Exception:
+                    raise ValueError("empty session registry")
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict) and isinstance(parsed.get("sessions", []), list):
+                    data = parsed
+                    if candidate.endswith(".bak"):
+                        print("[SessionManager] Recovered sessions from backup registry.")
+                    break
+            except Exception as e:
+                load_error = e
+
+        if data is None:
+            print(f"[SessionManager Warning] Registry unreadable: {load_error}")
             self._seed_default_companion()
             return
 
@@ -185,9 +199,15 @@ class SessionManager:
             self._seed_default_companion()
             return
 
-        for s in loaded_sessions:
-            sess = Session.from_dict(s)
-            self.sessions[sess.id] = sess
+        for record in loaded_sessions:
+            try:
+                sess = Session.from_dict(record)
+                self.sessions[sess.id] = sess
+            except Exception as e:
+                print(f"[SessionManager Warning] Skipped damaged session record: {e}")
+
+        if not self.sessions:
+            self._seed_default_companion()
 
     def _seed_default_companion(self):
         self.sessions = {}
@@ -203,11 +223,34 @@ class SessionManager:
 
     def _save(self):
         data = {"sessions": [s.to_dict() for s in self.sessions.values() if not s.private]}
+        target = SESSIONS_FILE
+        tmp = f"{target}.tmp"
+        backup = f"{target}.bak"
         try:
-            os.makedirs(os.path.dirname(SESSIONS_FILE), exist_ok=True)
-            with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if os.path.exists(target):
+                try:
+                    with open(target, "r", encoding="utf-8") as existing:
+                        current_data = json.load(existing)
+                    if isinstance(current_data, dict) and isinstance(current_data.get("sessions", []), list):
+                        shutil.copy2(target, backup)
+                except Exception:
+                    # Never overwrite a known-good backup with a damaged registry.
+                    pass
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            os.replace(tmp, target)
         except Exception as e:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
             print(f"[SessionManager Error] Save failed: {e}")
 
     def create_session(self, name=None, private=False, weighted_ocean=True, primacy_enabled=True):
