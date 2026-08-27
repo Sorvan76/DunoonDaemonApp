@@ -80,7 +80,15 @@ class TurnEngine:
             packet["max_tokens"] = 512
             packet["disable_reasoning"] = True
             packet["token_accountant"] = "relationship_summary_512"
-        elif source in {SourceKind.USER, SourceKind.LIVE_EVENT, SourceKind.SYSTEM_EVENT, SourceKind.INTERNAL_CONTROL}:
+        elif source is SourceKind.INTERNAL_CONTROL:
+            # Internal control work (including the automatic new-chat greeting) is bounded
+            # utility generation, not a place to spend the whole allowance on hidden thought.
+            requested = getattr(request.session, "solo_detail_tokens", getattr(self, "solo_actor_max_tokens", 768))
+            solo_tokens = self.set_solo_actor_budget(requested)
+            packet["max_tokens"] = solo_tokens
+            packet["disable_reasoning"] = True
+            packet["token_accountant"] = f"solo_internal_{solo_tokens}"
+        elif source in {SourceKind.USER, SourceKind.LIVE_EVENT, SourceKind.SYSTEM_EVENT}:
             requested = getattr(request.session, "solo_detail_tokens", getattr(self, "solo_actor_max_tokens", 768))
             solo_tokens = self.set_solo_actor_budget(requested)
             packet["max_tokens"] = solo_tokens

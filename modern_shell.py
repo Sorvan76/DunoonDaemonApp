@@ -129,6 +129,14 @@ class ModernShell:
         self._model_nudge_job = None
         self._model_nudge_phase = 0.0
         self.model_btn = None
+        self._persona_nudge_job = None
+        self._persona_nudge_phase = 0
+        self._persona_nudge_session_id = (
+            str(getattr(self.selected, 'id', '') or '')
+            if self.selected is not None and not str(getattr(self.selected, 'agent_name', '') or '').strip()
+            else ''
+        )
+        self.persona_btn = None
         prefs = load_ui_preferences()
         wanted_ctx = int(prefs.get('solo_context_tokens', DEFAULT_CONTEXT) or DEFAULT_CONTEXT)
         self.solo_context_tokens = min(SOLO_CONTEXT_LEVELS, key=lambda n: abs(n - wanted_ctx))
@@ -142,6 +150,7 @@ class ModernShell:
         self._build()
         self.show_home()
         self._ensure_model_nudge()
+        self._ensure_persona_nudge()
         self.root.protocol('WM_DELETE_WINDOW', self.close)
 
     def _p(self): return palette(self.skin_name)
@@ -277,7 +286,8 @@ class ModernShell:
         self._tip(ctx_box,'Solo / native model context window: 1K to 128K tokens. Applies the next time a GGUF is loaded.')
         self._tip(ctx_slider,'Choose the context window for Solo / native model loading. Default is 16K; larger values use more memory.')
         memory_btn=self._button(actions,'Memory',lambda:self.open_memory(s)); memory_btn.pack(side='left',padx=8); self._tip(memory_btn,'Inspect or purge this persona’s learned memory.')
-        persona_btn=self._button(actions,'Persona',lambda:self.open_persona(s)); persona_btn.pack(side='left',padx=8); self._tip(persona_btn,'Edit persona and OCEAN settings.')
+        self.persona_btn=self._button(actions,'Persona',lambda:self.open_persona(s)); self.persona_btn.pack(side='left',padx=8); self._tip(self.persona_btn,'Edit persona and OCEAN settings.')
+        self._apply_persona_button_state()
         lore_btn=self._button(actions,'Lore',lambda:self.open_lore(s)); lore_btn.pack(side='left',padx=8); self._tip(lore_btn,'Open campaign lore and assign knowledge sources to personas.')
 
         tk.Frame(self.main,bg=p['border'],height=1).pack(fill='x',padx=28)
@@ -327,6 +337,7 @@ class ModernShell:
         if getattr(s,'avatar_path',''):
             clear_btn=self._button(media_row,'Clear avatar',lambda:self.clear_avatar(s)); clear_btn.pack(side='left',padx=4); self._tip(clear_btn,'Remove the avatar.')
         self._ensure_model_nudge()
+        self._ensure_persona_nudge()
         ensure_button_tooltips(self.main, self._tooltips)
 
     def show_arena(self):
@@ -392,6 +403,8 @@ class ModernShell:
     def open_memory(self, session): PersonaMemoryDialog(self.root,self.skin_name,session)
     def open_lore(self, session=None): LoreLibraryDialog(self.root, self.skin_name, self.sm, focus_session=session or self.selected)
     def open_persona(self, session):
+        if str(getattr(session, 'id', '') or '') == str(self._persona_nudge_session_id or ''):
+            self._stop_persona_nudge()
         PersonaEditorDialog(self.root,self.skin_name,session,self.sm,on_saved=lambda _s:self._persona_saved(), brain=self.brain)
     def _persona_saved(self):
         self._rebuild_cards(); self.show_home()
@@ -458,13 +471,19 @@ class ModernShell:
         self.active_arena_instance = None
         sessions = self.sm.list_sessions()
         self.selected = sessions[0] if sessions else None
+        if self.selected is not None:
+            self._persona_nudge_session_id = str(getattr(self.selected, 'id', '') or '')
+            self._persona_nudge_phase = 0
         self._rebuild_cards()
         self.show_home()
 
     def create_persona(self):
         name=prompt_text(self.root,self.skin_name,'Create persona','Session name:')
         if not name: return
-        s=self.sm.create_session(name=name); s.session_manager=self.sm; self.selected=s; self._rebuild_cards(); self.show_home()
+        s=self.sm.create_session(name=name); s.session_manager=self.sm; self.selected=s
+        self._persona_nudge_session_id = str(getattr(s, 'id', '') or '')
+        self._persona_nudge_phase = 0
+        self._rebuild_cards(); self.show_home()
         # A newly-created persona may land below the previous viewport; make it visible immediately.
         self.root.after_idle(lambda: self.canvas.yview_moveto(1.0))
 
@@ -629,6 +648,55 @@ class ModernShell:
         self._model_nudge_phase = 0.0
         self._apply_model_button_state()
 
+    def _apply_persona_button_state(self):
+        btn = getattr(self, 'persona_btn', None)
+        if btn is None:
+            return
+        p = self._p()
+        selected_id = str(getattr(self.selected, 'id', '') or '') if self.selected is not None else ''
+        nudging = bool(self._persona_nudge_session_id and selected_id == str(self._persona_nudge_session_id))
+        try:
+            if nudging:
+                lit = (int(self._persona_nudge_phase) % 2) == 0
+                bg = p['accent'] if lit else p['button']
+                fg = contrast_text(bg) if lit else p['button_fg']
+                btn.configure(bg=bg, fg=fg, activebackground=p['accent'], activeforeground=contrast_text(p['accent']))
+            else:
+                btn.configure(bg=p['button'], fg=p['button_fg'], activebackground=p['accent'], activeforeground=p['bg'])
+        except Exception:
+            pass
+
+    def _persona_nudge_tick(self):
+        self._persona_nudge_job = None
+        if not self._persona_nudge_session_id:
+            self._persona_nudge_phase = 0
+            self._apply_persona_button_state()
+            return
+        self._persona_nudge_phase = int(self._persona_nudge_phase) + 1
+        self._apply_persona_button_state()
+        try:
+            self._persona_nudge_job = self.root.after(450, self._persona_nudge_tick)
+        except Exception:
+            self._persona_nudge_job = None
+
+    def _ensure_persona_nudge(self):
+        if not self._persona_nudge_session_id:
+            self._apply_persona_button_state()
+            return
+        if self._persona_nudge_job is None:
+            self._persona_nudge_tick()
+
+    def _stop_persona_nudge(self):
+        if self._persona_nudge_job is not None:
+            try:
+                self.root.after_cancel(self._persona_nudge_job)
+            except Exception:
+                pass
+        self._persona_nudge_job = None
+        self._persona_nudge_phase = 0
+        self._persona_nudge_session_id = ''
+        self._apply_persona_button_state()
+
     def _info(self,title,text): messagebox.showinfo(title,text,parent=self.root)
 
     def set_skin(self,name):
@@ -679,6 +747,7 @@ class ModernShell:
         except Exception as exc:
             print(f'[Recovery Shutdown Warning]: {exc}')
         self._stop_model_nudge()
+        self._stop_persona_nudge()
         try:
             if self.brain.model_handler: self.brain.model_handler.unload_model()
         except Exception: pass

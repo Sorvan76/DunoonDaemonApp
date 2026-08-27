@@ -10,8 +10,8 @@ _LOCK = threading.RLock()
 _DEFAULTS = {
     'chat_font_family': 'Segoe UI Emoji',
     'chat_font_size': 11,
-    # 🐉 Silver Wyrm: tooltips are assistance, not an infestation. Chief's build defaults OFF.
-    'show_tooltips': False,
+    # 🐉 Silver Wyrm: fresh installs expose hover help by default; users can still disable it.
+    'show_tooltips': True,
     'last_skin': '',
     # 🐉 Silver Wyrm: OFF means the Director may actively author plausible external developments.
     'block_director_creative_freedom': False,
@@ -44,7 +44,7 @@ def load_ui_preferences():
         size = 11
     prefs['chat_font_family'] = family
     prefs['chat_font_size'] = max(8, min(28, size))
-    prefs['show_tooltips'] = bool(prefs.get('show_tooltips', False))
+    prefs['show_tooltips'] = bool(prefs.get('show_tooltips', True))
     prefs['last_skin'] = str(prefs.get('last_skin') or '').strip()
     prefs['block_director_creative_freedom'] = bool(prefs.get('block_director_creative_freedom', False))
     prefs['autosave_recovery'] = bool(prefs.get('autosave_recovery', True))

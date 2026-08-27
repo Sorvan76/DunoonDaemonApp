@@ -108,7 +108,7 @@ class Session:
                  blind_to_others=False, backstory="", eto_enabled=True, mortality_enabled=False,
                  physiology="",
                  powers="", location="", threat="",
-                 opportunity="", is_deceased=False, narrative_freedom=False, avatar_path="",
+                 opportunity="", is_deceased=False, narrative_freedom=True, avatar_path="",
                  showcase_quote="", pinned_quotes=None, voice_mode="Sonia (UK Neural)",
                  dream_guidance="", last_dream_at="", last_dream_report=None,
                  ocean_controls_locked=False, resurrection_mode="", resurrected_at="",
@@ -134,8 +134,8 @@ class Session:
         self.threat = threat or ""
         self.opportunity = opportunity or ""
         self.is_deceased = bool(is_deceased)
-        # OFF by default: the user owns unstated consequential world facts unless
-        # collaborative worldbuilding is explicitly enabled for this persona.
+        # ON for newly-created personas: collaborative plot/worldbuilding is the
+        # default creative posture, while accepted reality and participant agency still win.
         self.narrative_freedom = bool(narrative_freedom)
         self.avatar_path = str(avatar_path or "")
         self.showcase_quote = str(showcase_quote or "")
