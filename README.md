@@ -1,176 +1,107 @@
-# 🐉 Dunoon Daemon
+# 🐉 Dunoon Daemon v2.1.0
 
-> **Your Personal, Persistent Local AI Companion & Story Engine**
+**Dunoon Daemon** is a free, open-source, local-first Windows AI character, companion and autonomous roleplay app built around local GGUF models.
 
-Welcome to **Dunoon Daemon** — a fully autonomous, local-first multi-agent companion suite designed for creative writers, tabletop roleplayers, and anyone seeking persistent AI companions that never forget.
+It is aimed at tabletop roleplayers, GMs, writers and anyone who wants persistent local characters rather than a hosted chatbot. The configured GGUF is the app's primary semantic brain; Python owns deterministic state, persistence and authority boundaries.
 
-Everything runs entirely on your local hardware. No cloud subscriptions, no telemetry leaks, and zero mandatory internet connections once your models and weights are loaded[cite: 35].
+## What v2.1.0 does
 
----
+- Persistent personas with OCEAN personality profiles, backstory, physiology, powers and relationships.
+- Four Solo conversation modes: Continuation, Sandbox, Canvas and Bubble.
+- Persona-scoped learned memory with Working, Deep, Journal, Intent, Task, Factual, Continuation, Reset and superseded-history handling.
+- **Campaign Lore**: upload source material and explicitly assign which personas are allowed to retrieve it.
+- **Arena**: two autonomous personas share a Director-governed SceneStore so actor prose cannot simply declare objective reality.
+- Environment, Threat and Opportunity (ETO) grounding.
+- Vision with compatible GGUF + `mmproj`, document upload, local/OS narration, transcript export, skins and tooltips.
+- Dream maintenance, optional mortality/resurrection, crash recovery, Backup/Restore and Master Purge.
+- Native `llama.cpp` / `llama-server` inference. There is no LM Studio fallback in the current architecture.
 
-## ✨ Key Capabilities
+## Portable Windows release
 
-* **Strict Session-Scoped Memory**: Tiered storage (Working Memory, Deep Memory, Factual Vaults, and Journals) isolated in per-companion vaults (`data/sessions/<session_id>/vaults/`)[cite: 4, 35].
-* **Dynamic OCEAN Psychology**: Simulates Big Five personality variance and daily emotional shifts affecting tone, vocabulary, and empathy levels[cite: 3, 35].
-* **Dual Arena Debate Deck**: Host live multi-agent debates with dynamic topic intervention, user injection, and autonomous event triggers[cite: 5, 35].
-* **Universal Multimodal Perception**: Ingests images, transcribes spoken audio tracks via local Whisper, parses PDFs, Word docs, and plain text code files.
-* **Expressive Eye Telemetry**: Dual vector digital eyes respond dynamically to hidden LLM affective metadata envelopes (`<!--meta:{...}-->`)[cite: 7, 21, 35].
-* **Multi-Archetype Neural Speech**: Built-in Edge TTS streaming with local SAPI5 fallback and smooth audio fade-out logic[cite: 26, 35].
-
----
-
-## 🚀 Quick Start Guide
-
-### Prerequisites
-* **OS**: Windows 10/11 (64-bit)[cite: 35]
-* **Python**: 3.11+ (if running from source)[cite: 35]
-* **GPU**: NVIDIA (CUDA) or AMD/Intel (Vulkan) recommended; CPU fallback supported[cite: 4, 35].
-
-### 1. Launch the Engine
-Open `controller.py` or run the standalone executable[cite: 35]. Select your preferred inference pipeline:
-* **Native C++ Server**: Click **📂 Load GGUF Model** to point to any local GGUF file[cite: 5, 35]. The daemon auto-detects your GPU, pulls optimized binaries into `bin/`, and spins up `llama-server.exe`[cite: 5, 8, 20, 35].
-* **LM Studio (Local API)**: Start the Local Server in LM Studio (port 1234), and the Daemon connects automatically[cite: 2, 5, 35].
-
-### 2. Create a Companion
-1. Click **➕ New Chat** and name your session[cite: 5, 35].
-2. Choose a baseline personality mode (**Dynamic OCEAN** recommended)[cite: 3, 5, 35].
-3. Click **🎭 Edit Persona** to roll a random archetype or configure your custom character directives and backstory[cite: 5, 22, 35].
-
-### 3. Open Dialogue
-Double-click your companion in the session deck to launch the active chat canvas[cite: 5, 35].
-
----
-
-## ⚡ Slash Command Reference
-
-Execute these commands directly in the dialogue input bar for rapid control[cite: 6, 35]:
-
-* `/remember <text>` — Forces direct storage into the permanent Journal Vault[cite: 6, 13, 35].
-* `/memories` or `/vault` — Displays diagnostic counts across all memory tiers[cite: 6, 35].
-* `/forget <n>` — Purges the last *n* conversational turns from context[cite: 6, 35].
-* `/clear` — Clears visual canvas history without altering memory vaults[cite: 6, 35].
-* `/character` — Displays active OCEAN traits and daily mood shifts[cite: 3, 6, 35].
-* `/baseline` — Locks personality into a neutral, analytical state[cite: 6, 35].
-* `/ubaseline` — Re-enables dynamic daily mood variance[cite: 3, 6, 35].
-* `/status` — Displays active model, endpoint, and voice provider[cite: 6, 35].
-* `/see` or `/upload` — Opens file staging browser for multimodal ingestion[cite: 6, 35].
-* `/splash` — Forces Python garbage collection to free RAM/VRAM[cite: 6, 35].
-* `/eject` — Unloads GGUF models and completely flushes VRAM[cite: 5, 6, 35].
-* `/talk 1 | 2 | 3` — Sets vocal reading speed: Slow (1), Medium (2), or Fast (3)[cite: 6, 26, 35].
-
----
-
-## 📁 Repository Structure
+The public v2.1.0 package is distributed as a normal ZIP rather than a giant self-extracting executable.
 
 ```text
-DunoonDaemonApp/
-├── bin/                                # Native engine binaries (llama-server.exe, runtimes)[cite: 4, 20, 35]
-├── data/[cite: 4, 35]
-│   ├── audio_cache/                    # Temporary speech cache[cite: 4, 35]
-│   └── sessions/                       # Session registry & isolated companion vaults[cite: 4, 24, 35]
-│       ├── sessions.json               # Master session catalog[cite: 4, 24, 35]
-│       └── <session_id>/               # Isolated per-companion sub-vault[cite: 4, 35]
-│           └── vaults/[cite: 4, 35]
-│               ├── working_memory.json # Short-term working buffer[cite: 4, 19, 35]
-│               ├── deep_memory.json    # Consolidated episodic memory[cite: 4, 13, 35]
-│               ├── journal_vault.json  # High-salience structured journal entries[cite: 4, 10, 35]
-│               ├── embeddings.json     # Per-session SentenceTransformer vector store[cite: 4, 14, 35]
-│               ├── intent_memory.json  # Procedural mandates & directives[cite: 4, 16, 35]
-│               ├── task_memory.json    # Workflow & step-tracking memory[cite: 4, 16, 35]
-│               ├── factual_memory.json # Core biographical facts[cite: 4, 16, 35]
-│               ├── continuation_memory.json[cite: 4, 16, 35]
-│               ├── reset_memory.json[cite: 4, 16, 35]
-│               └── prune_telemetry.json[cite: 4, 23, 35]
-├── models/                             # Local GGUF models & mmproj vision projectors[cite: 4, 20, 35]
-├── brain.py                            # Central cognitive routing & CPU affinity[cite: 1, 35]
-├── bridge.py                           # LM Studio local API bridge[cite: 2, 35]
-├── character.py                        # OCEAN Big Five profiling & daily mood variance[cite: 3, 35]
-├── config.py                           # Portable path resolution & hardware detection[cite: 4, 35]
-├── controller.py                       # Main deck UI, session manager, & Dual Arena host[cite: 5, 35]
-├── dunoon_daemon.py                    # Autonomous companion chat canvas & multimodal deck[cite: 6, 35]
-├── eye_engine.py                       # Expressive vector eye telemetry & pupil dynamics[cite: 7, 35]
-├── fetch_engine.py                     # C++ binary & runtime auto-fetcher[cite: 8, 35]
-├── journal_entry.py / journal_vault.py # Structured salience journaling & atomic storage[cite: 9, 10, 35]
-├── memory_api.py                       # Public ingestion gateway[cite: 12, 35]
-├── memory_deep.py / memory_working.py  # Thread-safe tiered memory engines[cite: 13, 19, 35]
-├── memory_embeddings.py                # Local vector embedding & semantic cosine search[cite: 14, 35]
-├── memory_integrity.py                 # Vault sanitizer & auto-healer[cite: 15, 35]
-├── memory_router.py                    # Semantic intent & vault classification router[cite: 16, 35]
-├── memory_transfer.py                  # Cross-persona insight distillation bridge[cite: 17, 35]
-├── memory_validation.py                # Sanitization & private data filter[cite: 18, 35]
-├── model_handler.py                    # Native C++ subprocess manager & zombie cleaner[cite: 20, 35]
-├── overmind.py                         # Context fusion & dual-channel telemetry engine[cite: 21, 35]
-├── persona.py                          # Procedural persona synthesis engine[cite: 22, 35]
-├── prune.py                            # Sleep cycle consolidation & capacity controller[cite: 23, 35]
-├── session_manager.py                  # Session registry & disk persistence[cite: 24, 35]
-├── significance.py                     # Vector salience & entropy scoring engine[cite: 28, 35]
-├── skin_manager.py                     # Dynamic theme palettes & widget skinning[cite: 29, 35]
-├── state_engine.py                     # Conversation heuristic mood tracker[cite: 25, 35]
-├── tts_handler.py                      # Multi-archetype neural voice engine[cite: 26, 35]
-└── vault_auto_repair.py                # Global & session vault format repair[cite: 27, 35]
-[ User Dialogue / Staged Artifact ]
-                │
-                ▼
-      ┌──────────────────┐
-      │ memory_validation│ ─── Blocks sensitive credentials & malformed payloads
-      └─────────┬────────┘
-                │
-                ▼
-      ┌──────────────────┐
-      │  memory_router   │ ─── Semantic subspace matching across intent/task/facts
-      └─────────┬────────┘
-                │
-  ┌─────────────┼───────────────────────────┐
-  │             │                           │
-  ▼             ▼                           ▼
-[ Working ]  [ Intent / Task / Facts ]   [ Deep / Journal ]
-  │             │                           │
-  │             └─────────────┬─────────────┘
-  │                           │
-  ▼                           ▼
-┌─────────────────────────────────────────────────────────┐
-│ Thread-Safe Atomic Persistence Layer (_lock + .tmp swap)│
-└─────────────────────────────┬───────────────────────────┘
-                              │
-                              ▼
-                 ┌──────────────────────────┐
-                 │    memory_embeddings     │ (Local SentenceTransformers)
-                 │  Per-Session Vector DB   │
-                 └────────────┬─────────────┘
-                              │
-                              ▼
-┌───────────────────────────────────────────────────────────┐
-│                      overmind.py                          │
-│                                                           │
-│  • System Directives + Dynamic OCEAN Profile (character)  │
-│  • Heuristic State Mood Offsets (state_engine)            │
-│  • Semantic Memory Retrieval (Working + Deep + Journals)  │
-│  • Filtered Cross-Persona Insights (memory_transfer)      │
-│  • Recency-Ranked History Buffer                          │
-└─────────────────────────────┬─────────────────────────────┘
-                              │
-                              ▼
-              ┌───────────────────────────────┐
-              │ Dynamic Inference Execution   │
-              │  ├─ Native C++ llama-server   │
-              │  └─ LM Studio API (Fallback)  │
-              └───────────────┬───────────────┘
-                              │
-                              ▼
-                 [ Dual-Channel Output Stream ]
-                 ├── <!--meta:{...}--> ──► [ Eye Telemetry / Signal Engine ]
-                 └── Clean Dialogue    ──► [ Typewriter UI + Neural Voice TTS ]
-                              │
-                              ▼ (Background Idle Hook)
-                 ┌─────────────────────────────┐
-                 │    run_session_sleep_cycle  │
-                 │   (Consolidation & Prune)   │
-                 └─────────────────────────────┘
-                 git clone https://github.com/your-username/DunoonDaemonApp.git
-cd DunoonDaemonApp
-pip install requests psutil pygame edge-tts pyttsx3 sentence-transformers numpy Pillow pypdf python-docx faster-whisper
-python controller.py
-📜 Dedication & License
-Distributed under the MIT License.
+DunoonDaemon_v2.1.0/
+├── DunoonDaemon.exe
+├── bin/                 # proven llama.cpp / CUDA / backend runtime
+├── data/                # writable app state
+├── models/              # optional place for your GGUF files
+├── Dunoon_Daemon_App_THE_TOME_v2.1.0_PARCHMENT_EDITION.pdf
+└── The_Goblins_Guide_to_Dunoon_Daemon_App_v2.1.0_PARCHMENT_EDITION.pdf
+```
 
-Dedicated to the loyal companions who walk with us through every realm, and the code that keeps their echoes alive. For Kylo.
+**Extract the whole ZIP before running it. Keep `bin` beside `DunoonDaemon.exe`.** No separate Python installation is required for the packaged release.
+
+The entire Dunoon Daemon folder can be moved to another writable location or USB drive. The app resolves its writable state and native runtime relative to the executable.
+
+The large native `bin/` runtime is intentionally not stored in normal Git history. It is bundled with the public portable release package.
+
+## Five-minute start
+
+1. Download a compatible GGUF instruct/chat model. Q4 or Q4_K_M is a sensible first try when available.
+2. Extract the complete Dunoon Daemon release ZIP.
+3. Keep `DunoonDaemon.exe` and `bin/` together.
+4. Run `DunoonDaemon.exe`.
+5. Create a persona, optionally Randomise its OCEAN profile, and save it.
+6. Load your `.gguf` model.
+7. Open **Continuation** and say hello.
+
+For the beginner version, read **The Goblin's Guide**. For the full system, read **The Tome**. Both parchment PDFs are distributed with the portable release package.
+
+## Running from source
+
+Windows 10/11 and Python 3.10+ are recommended.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python .\modern_shell.py
+```
+
+Source runs still need a compatible `bin/llama-server.exe` runtime beside the source tree. GGUF models are not included in the repository.
+
+## Building the windowed EXE
+
+Install PyInstaller in the build environment, then run:
+
+```powershell
+.\build_portable_exe.ps1
+```
+
+`DunoonDaemon_portable.spec` freezes `modern_shell.py`, the imported Dunoon Daemon modules, Python and the required Python packages into a windowed `DunoonDaemon.exe`. It **does not** embed the large native `bin/` directory. The final release ZIP supplies that directory beside the EXE.
+
+## Source layout
+
+- `modern_shell.py` — modern application entry point.
+- `dunoon_daemon.py`, `modern_daemon.py` — Solo conversation UI/behaviour.
+- `modern_arena.py` and `core/` — Arena, Director, SceneStore and turn authority.
+- `campaign_lore.py`, `modern_lore.py` — Campaign Lore library and retrieval UI.
+- `memory_*.py`, `journal_*.py`, `release_support.py` — persistent memory, journaling, backup/recovery and diagnostics.
+- `model_handler.py` — local `llama-server` lifecycle and GGUF loading.
+- `persona*.py`, `character.py` — persona identity, import/export and OCEAN behaviour.
+- `modern_theme.py`, `custom_skins.py`, `skin_manager.py` — interface theming.
+- `DunoonDaemon_portable.spec`, `build_portable_exe.ps1` — Windows frozen build recipe.
+
+Runtime-created JSON state, GGUF weights, build output and the large native runtime are ignored by Git.
+
+## Authority rule in one paragraph
+
+In Solo, the human establishes and can correct current external reality while the persona owns its own speech, intentions and voluntary actions. In Arena, the human establishes the starting scenario, then the Director owns shared external reality while each controlled persona owns itself. Learned memory is historical evidence, not present-world authority; current accepted reality outranks memory.
+
+## Documentation
+
+The portable release package includes:
+
+- `Dunoon_Daemon_App_THE_TOME_v2.1.0_PARCHMENT_EDITION.pdf` - full operator's manual and systems guide.
+- `The_Goblins_Guide_to_Dunoon_Daemon_App_v2.1.0_PARCHMENT_EDITION.pdf` - one-page beginner quickstart.
+
+The current parchment PDFs are kept in the repository for reference and are also distributed with the portable release package.
+
+## License
+
+MIT License. See `LICENSE`.
+
+Created by **sorvan76 (Kepler365) and ChatGPT — Human / AI Fusion (2026)**.
+
+Dedicated to the loyal companions who walk with us through every realm, and the code that keeps their echoes alive. **For Kylo.**

@@ -18,6 +18,7 @@ import re
 import traceback
 import asyncio
 import pygame
+from ui_windowing import apply_window_icon
 
 try:
     from PIL import Image, ImageTk
@@ -59,18 +60,20 @@ from memory_router import route_memory
 from memory_deep import save_deep_memory_journal
 from memory_validation import validate_memory
 from memory_integrity import check_memory_integrity
-from skin_manager import SKINS, apply_skin, load_skin, get_sorted_skin_names
-from overmind import overmind, build_overmind_packet
+from memory_lifecycle import is_runtime_artifact
+try:
+    from eye_diagnostics import log_dialogue
+except Exception:
+    def log_dialogue(*_args, **_kwargs):
+        return None
+from skin_manager import SKINS, apply_skin, load_skin, save_skin, get_sorted_skin_names
+from ui_preferences import load_ui_preferences, save_ui_preferences
+from overmind import overmind
+from core.actor_prompt import build_actor_packet
 from bridge import get_last_finish_reason, reset_last_finish_reason
+from last_dirs import get_last_dir, remember_path
 
 ensure_dirs()
-
-_LAST_UPLOAD_DIRS = {
-    "all": None,
-    "image": None,
-    "audio": None,
-    "document": None
-}
 
 try:
     import edge_tts
@@ -190,6 +193,10 @@ def _normalize_text_spacing(text: str) -> str:
     return text.strip()
 
 
+
+
+
+
 def _extract_dual_channel_meta(raw_text: str) -> tuple[dict, str]:
     """
     Extracts cognitive JSON metadata from any tag format:
@@ -237,8 +244,37 @@ def _extract_dual_channel_meta(raw_text: str) -> tuple[dict, str]:
     return meta_dict, clean_text
 
 
+def _sanitize_protocol_leakage(text: str, agent_name: str = "") -> str:
+    """Remove model-echoed internal control/telemetry without interpreting story content."""
+    out = str(text or "")
+    out = re.sub(r"(?im)^\s*New (?:session|turn) initialized:?\.?\s*", "", out)
+    out = re.sub(
+        r"(?im)^\s*\[PREVIOUS-TURN SEMANTIC TELEMETRY\]\s*\n\s*mood=.*?(?:\n|$)",
+        "",
+        out,
+    )
+    out = re.sub(r"(?is)\n?\s*\[ARENA TURN CONTRACT[^\]]*\].*$", "", out)
+    out = re.sub(r"(?is)\n?\s*\[CURRENT ACTOR STATE ANCHOR[^\]]*\].*$", "", out)
+    out = re.sub(r"(?is)\n?\s*\[PARTICIPANT OWNERSHIP[^\]]*\].*$", "", out)
+    out = re.sub(r"(?im)^\s*\[FACTUAL HANDOFF FROM[^\]]*\]\s*$", "", out)
+    out = re.sub(r"(?im)^\s*(?:this|the)\s+hidden\s+(?:telemetry|meta)(?:\s+envelope)?\b[^\n]*$", "", out)
+    out = re.sub(r"(?im)^\s*\[(?:SYSTEM PROTOCOL|ACTOR-RELATIVE SITUATIONAL GAUGES|CURRENT DYNAMIC WORLD STATE)[^\]]*\]\s*$", "", out)
+    out = re.sub(r"★[^★\n]*\[(?:ANCHOR|MUTED)\]", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"(?i)\[(?:ANCHOR|MUTED)\]", "", out)
+
+    if agent_name:
+        # Cosmetic self-label only; does not alter narrative content.
+        out = re.sub(
+            rf"(?im)^\s*(?:[-*>]+\s*)?{re.escape(str(agent_name).strip())}\s*:\s*",
+            "",
+            out,
+        )
+
+    return _normalize_text_spacing(out)
+
+
 def send_multimodal_message(text, file_path=None, endpoint=None, system_prompt="", history=None):
-    """Send a vision turn while preserving the same persona/system/history packet as text chat."""
+    """Send a vision turn to Dunoon's own OpenAI-compatible llama-server endpoint."""
     if not endpoint:
         endpoint = f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/v1/chat/completions"
 
@@ -253,66 +289,52 @@ def send_multimodal_message(text, file_path=None, endpoint=None, system_prompt="
         if mime not in ("image/png", "image/jpeg", "image/webp"):
             mime = "image/png"
 
-    if "/api/v1/chat" in endpoint:
-        # LM Studio's legacy input form does not expose the same structured message API,
-        # so preserve Dunoon context by serialising the packet into the input text.
-        context_lines = []
-        if system_prompt:
-            context_lines.append(f"[SYSTEM CONTEXT]\n{system_prompt}")
-        for item in history[-10:]:
-            if isinstance(item, dict):
-                role = item.get("role", "user")
-                content = item.get("content", "")
-                if content:
-                    context_lines.append(f"[{role.upper()}]\n{content}")
-        context_lines.append(f"[CURRENT USER]\n{text}")
-        payload = {
-            "model": MODEL_NAME or "local-model",
-            "input": "\n\n".join(context_lines),
-        }
-        if b64:
-            payload["images"] = [f"data:{mime};base64,{b64}"]
-    else:
-        content = [{"type": "text", "text": text}]
-        if b64:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"}
-            })
+    content = [{"type": "text", "text": text}]
+    if b64:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}"}
+        })
 
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        for item in history[-10:]:
-            if isinstance(item, dict):
-                role = item.get("role", "user")
-                if role not in ("user", "assistant", "system"):
-                    role = "user"
-                content_text = item.get("content", "")
-                if content_text:
-                    messages.append({"role": role, "content": content_text})
-        messages.append({"role": "user", "content": content})
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    for item in history[-10:]:
+        if isinstance(item, dict):
+            role = item.get("role", "user")
+            if role not in ("user", "assistant", "system"):
+                role = "user"
+            content_text = item.get("content", "")
+            if content_text:
+                messages.append({"role": role, "content": content_text})
+    messages.append({"role": "user", "content": content})
 
-        payload = {
-            "model": MODEL_NAME or "local-model",
-            "messages": messages,
-            "max_tokens": 2048,
-            "temperature": 0.7
-        }
+    payload = {
+        "model": MODEL_NAME or "local-model",
+        "messages": messages,
+        "max_tokens": 2048,
+        "temperature": 0.7
+    }
 
     try:
         resp = requests.post(endpoint, json=payload, timeout=90)
         resp.raise_for_status()
         data = resp.json()
-
-        if "choices" in data and len(data["choices"]) > 0:
-            return data["choices"][0]["message"]["content"]
-        return data.get("output_text") or "(No reply returned, chief.)"
-
+        choices = data.get("choices", [])
+        if choices:
+            try:
+                from bridge import set_last_finish_reason
+                set_last_finish_reason(choices[0].get("finish_reason"))
+            except Exception:
+                pass
+            return choices[0].get("message", {}).get("content", "") or "(No reply returned, chief.)"
+        return "(No reply returned, chief.)"
     except Exception as e:
         return f"[Multimodal Error: {e}]"
 
+
 def detect_model_name():
+    """Query only Dunoon's own native llama-server."""
     try:
         info = requests.get(f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/v1/models", timeout=0.5).json()
         models = info.get("data", [])
@@ -320,16 +342,6 @@ def detect_model_name():
             return models[0].get("id", "local-model")
     except Exception:
         pass
-
-    try:
-        info = requests.get("http://localhost:1234/api/v1/models", timeout=0.5).json()
-        model = info["data"][0]
-        name = model.get("id") or model.get("name")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-    except Exception:
-        pass
-
     return "local-model"
 
 
@@ -493,7 +505,6 @@ class UniversalFileProcessor:
                 continue
         raise ValueError("Could not decode plain text file.")
 
-
 class DunoonDaemonApp:
     def __init__(self, root, session, session_manager=None, brain=None):
         self.brain = brain
@@ -551,6 +562,7 @@ class DunoonDaemonApp:
         if os.path.exists(icon_ico_path):
             try:
                 self.root.iconbitmap(icon_ico_path)
+                apply_window_icon(self.root, set_default=True)
             except Exception as e:
                 print(f"[Iconbitmap Daemon Warning]: {e}")
 
@@ -576,26 +588,13 @@ class DunoonDaemonApp:
         self._load_initial_session()
 
     def get_active_endpoint(self):
+        """Return Dunoon's own native llama-server endpoint; there is no silent external fallback."""
         controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
         brain_obj = getattr(self, "brain", None) or (controller.brain if controller else None)
+        handler = getattr(brain_obj, "model_handler", None) if brain_obj else None
 
-        if brain_obj and hasattr(brain_obj, "model_handler") and brain_obj.model_handler:
-            if getattr(brain_obj.model_handler, "server_process", None) is not None:
-                return f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/v1/chat/completions"
-
-        try:
-            resp = requests.get(f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/v1/models", timeout=0.5)
-            if resp.status_code == 200:
-                return f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/v1/chat/completions"
-        except Exception:
-            pass
-
-        try:
-            resp = requests.get("http://localhost:1234/api/v1/models", timeout=0.5)
-            if resp.status_code == 200:
-                return "http://localhost:1234/api/v1/chat"
-        except Exception:
-            pass
+        if handler and getattr(handler, "is_active", lambda: False)():
+            return getattr(handler, "api_url", f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/v1/chat/completions")
 
         return f"http://{DEFAULT_HOST}:{DEFAULT_PORT}/v1/chat/completions"
 
@@ -697,10 +696,10 @@ class DunoonDaemonApp:
                 self._append_local_system_notice(f"🎵 Attached Audio: {file_name} [Audio Error: {e}]")
 
     def upload_as_file(self):
-        initial_dir = _LAST_UPLOAD_DIRS.get("all") or os.path.expanduser("~")
+        initial_dir = get_last_dir("attachment_all")
         path = filedialog.askopenfilename(
             initialdir=initial_dir,
-            title="Stage File for Context (Code, Documents, Images, Audio)",
+            title="Stage file for context (code, documents, images, audio)",
             filetypes=[
                 ("All Supported Files", "*.png *.jpg *.jpeg *.webp *.bmp *.gif *.mp3 *.wav *.m4a *.flac *.ogg *.pdf *.docx *.txt *.py *.md *.json *.csv *.log *.js *.cpp"),
                 ("Images (Vision)", "*.png *.jpg *.jpeg *.webp *.bmp *.gif"),
@@ -711,16 +710,14 @@ class DunoonDaemonApp:
             ]
         )
         if path and os.path.exists(path):
-            chosen_dir = os.path.dirname(path)
-            _LAST_UPLOAD_DIRS["all"] = chosen_dir
-            
+            remember_path("attachment_all", path)
             ext = os.path.splitext(path)[1].lower()
             if ext in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif'):
-                _LAST_UPLOAD_DIRS["image"] = chosen_dir
+                remember_path("attachment_image", path)
             elif ext in ('.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac'):
-                _LAST_UPLOAD_DIRS["audio"] = chosen_dir
+                remember_path("attachment_audio", path)
             else:
-                _LAST_UPLOAD_DIRS["document"] = chosen_dir
+                remember_path("attachment_document", path)
 
             self.staged_file = path
             fname = os.path.basename(path)
@@ -1023,7 +1020,7 @@ class DunoonDaemonApp:
             self.finish_btn = mkbtn("⏹️ Finish", self._handle_finish_click, 1, tip_text="Instantly complete ongoing typewriter streaming.")
             self.continue_btn = mkbtn("⏩ Continue", lambda: self._force_continue("Please continue."), 2, tip_text="Prompt agent to resume speaking.")
             self.poke_btn = mkbtn("👉 Poke", self._handle_poke_click, 3, tip_text="Prompt agent to speak spontaneously.")
-            self.event_btn = mkbtn("⚡ Event", self._handle_add_event_click, 4, bg="#553311", fg="#ffaa00", tip_text="Inject an unfolding narrative situation from recent memories.")
+            self.event_btn = mkbtn("⚡ Event", self._handle_add_event_click, 4, bg="#553311", fg="#ffaa00", tip_text="Generate an unfolding event from the current scene.")
 
             voice_options = [
                 "Sonia (UK Neural)",
@@ -1044,6 +1041,11 @@ class DunoonDaemonApp:
 
             try:
                 self.entry.focus_set()
+            except Exception:
+                pass
+            try:
+                from modern_tooltips import ensure_button_tooltips
+                ensure_button_tooltips(self.root, self.tooltips)
             except Exception:
                 pass
 
@@ -1117,14 +1119,14 @@ class DunoonDaemonApp:
     def _handle_poke_click(self):
         self._stop_continue_flash()
         agent_display = getattr(self.session, "agent_name", "Kylo")
-        session_id = getattr(self.session, "id", None) or getattr(self.session, "session_id", None)
+        session_id = getattr(self.session, "memory_session_id", None) or getattr(self.session, "id", None) or getattr(self.session, "session_id", None)
 
         self.eyes.set_signal("#00eaff", sustain_seconds=1.5, pupil_scale=1.3)
         self._show_thinking()
         self.eyes.start_breathing()
 
         def worker():
-            working_mems = load_working_memory(session_id=session_id)
+            working_mems = load_working_memory(session_id=session_id) if bool(getattr(self.session, "memory_read_enabled", True)) else []
             context_hint = ""
             if working_mems:
                 last_mems = [m.get("text", "") if isinstance(m, dict) else str(m) for m in working_mems[-4:]]
@@ -1152,24 +1154,20 @@ class DunoonDaemonApp:
     def _handle_add_event_click(self):
         self._stop_continue_flash()
         agent_display = getattr(self.session, "agent_name", "Kylo")
-        session_id = getattr(self.session, "id", None) or getattr(self.session, "session_id", None)
 
+        # 🐉 Silver Wyrm: make the asynchronous action visible immediately.
+        self._append_local_system_notice("⚡ Event pending…")
         self.eyes.set_signal("#ff8800", sustain_seconds=2.0, pupil_scale=1.4)
         self._show_thinking()
         self.eyes.start_breathing()
 
         def worker():
-            working_mems = load_working_memory(session_id=session_id, limit=10)
-            mem_block = ""
-            if working_mems:
-                parsed_mems = [m.get("text", "") if isinstance(m, dict) else str(m) for m in working_mems]
-                mem_block = "\n".join(parsed_mems)
-
             event_prompt = (
                 f"[DIRECTIVE: NARRATIVE EVENT INJECTION]\n"
-                f"Scan these recent context memories:\n{mem_block}\n\n"
-                f"Invent an instant, high-stakes external event or sudden occurrence unfolding right now in the scene. "
-                f"React to it immediately in character as {agent_display} (2-3 sentences). Force a reaction from the User!"
+                "Use only the current conversation/current physical scene as the event premise. "
+                "Do not restore a person, place, object, hazard, injury or unfinished incident merely because it existed in an older memory or another scene. "
+                "Invent one immediate external occurrence that can plausibly arise from the live scene as it exists now. "
+                f"React to it immediately in character as {agent_display} (2-3 sentences). Give the human something concrete to respond to."
             )
 
             try:
@@ -1207,6 +1205,12 @@ class DunoonDaemonApp:
                     self.session_manager._save()
                 elif hasattr(self.session_manager, "save_sessions"):
                     self.session_manager.save_sessions()
+                try:
+                    if load_ui_preferences().get('autosave_recovery', True):
+                        from release_support import autosave_recovery
+                        autosave_recovery(self.session_manager, session_id=getattr(self.session, 'memory_session_id', None) or getattr(self.session, 'id', None))
+                except Exception as recovery_error:
+                    print(f"[Recovery Autosave Warning]: {recovery_error}")
         except Exception as e:
             self._append_local_system_notice(f"Session save failed, chief: {e}")
 
@@ -1216,7 +1220,7 @@ class DunoonDaemonApp:
             self.tts.stop()
             self.speak_button.config(text="Speak")
         else:
-            self.speak_button.config(text="Spk On")
+            self.speak_button.config(text="Spk on")
 
     def speak(self, text):
         if self.speech_enabled:
@@ -1281,14 +1285,23 @@ class DunoonDaemonApp:
         if not clean:
             return True, "empty visible response"
 
+        # 🐉 Silver Wyrm: SOLO COMPLETION CONTRACT: a trustworthy backend STOP means the
+        # model completed its turn. Solo prose is intentionally freer than Arena prose;
+        # unmatched quotes/asterisks and unconventional terminal punctuation are not
+        # sufficient reason to censor an otherwise completed roleplay response.
+        if reason in {"stop", "eos", "end_turn", "endoftext"}:
+            return False, ""
+
+        # When the transport supplies no trustworthy finish signal, retain conservative
+        # syntax heuristics as a last-resort truncation detector only.
         if clean.count('"') % 2 != 0:
-            return True, "unclosed quotation"
+            return True, "unclosed quotation with unknown finish state"
         if clean.count('*') % 2 != 0:
-            return True, "unclosed action/markdown delimiter"
+            return True, "unclosed action/markdown delimiter with unknown finish state"
 
         terminal = clean.rstrip()
-        if len(terminal) >= 40 and terminal[-1] not in '.!?…”\'*)]}':
-            return True, "response ended without a closing boundary"
+        if not reason and len(terminal) >= 40 and terminal[-1] not in '.!?…”\'*)]}':
+            return True, "response ended without a closing boundary and no finish signal"
 
         return False, ""
 
@@ -1316,13 +1329,37 @@ class DunoonDaemonApp:
         try:
             controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
             if controller and hasattr(controller, "brain") and controller.brain:
-                repaired_raw = controller.brain.infer(repair_prompt, self.session, source="internal_control")
+                brain = controller.brain
+                # 🐉 Silver Wyrm: normal Solo keeps its richer reasoning behaviour. Only an
+                # already-failed completion retry uses a reasoning-free rescue packet so
+                # hidden thought cannot consume the recovery budget a second time.
+                backend = getattr(brain, "backend", None)
+                if backend and getattr(backend, "is_ready", lambda: False)():
+                    repair_packet = build_actor_packet(
+                        repair_prompt,
+                        self.session,
+                        source="internal_control",
+                    )
+                    repair_packet["max_tokens"] = 3072
+                    repair_packet["disable_reasoning"] = True
+                    repair_packet["token_accountant"] = "solo_completion_repair_3072"
+                    repaired_raw = backend.generate(repair_packet)
+                    print(f"[Solo Completion Repair] {getattr(self.session, 'agent_name', 'Persona')} -> 3072 visible tokens; reasoning OFF for repair only")
+                else:
+                    repaired_raw = brain.infer(
+                        repair_prompt, self.session, source="internal_control", commit_lifecycle=False
+                    )
             else:
-                repaired_raw = overmind(repair_prompt, self.session, source="internal_control")
+                repaired_raw = overmind(
+                    repair_prompt, self.session, source="internal_control", commit_lifecycle=False
+                )
         except Exception as e:
             return None, f"repair inference failed: {e}"
 
         _, repaired_clean = _extract_dual_channel_meta(str(repaired_raw))
+        repaired_clean = _sanitize_protocol_leakage(
+            repaired_clean, getattr(self.session, "agent_name", "Kylo")
+        )
         repaired_reason = get_last_finish_reason()
         still_bad, why = self._turn_incomplete(repaired_raw, repaired_clean, repaired_reason)
         if still_bad:
@@ -1334,6 +1371,23 @@ class DunoonDaemonApp:
         continuation = repaired_clean.lstrip()
         combined = (base.rstrip() + " " + continuation).strip() if base else continuation
         return combined, None
+
+    def _preflight_situation_gauges(self, context_text: str, source: str = "user"):
+        """Run one neutral semantic urgency assessment before the persona sees the turn."""
+        try:
+            from overmind import assess_actor_situation
+            controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
+            model_handler = getattr(getattr(controller, "brain", None), "model_handler", None) if controller else None
+            return assess_actor_situation(
+                context_text,
+                self.session,
+                getattr(self.session, "agent_name", "Kylo"),
+                model_handler=model_handler,
+                source=source,
+            )
+        except Exception as e:
+            print(f"[Solo Situation Gauge Warning]: {e}")
+            return None
 
     def send_message(self, event=None):
         if self.is_generating:
@@ -1357,6 +1411,16 @@ class DunoonDaemonApp:
             self.is_generating = False
             return
 
+        # 🐉 Silver Wyrm: persistent mortality is persona state, not a per-window suggestion.
+        # A Bubble/Sandbox view must not bypass a death recorded on the base persona.
+        _base_persona = getattr(self.session, "base_session", self.session)
+        if bool(getattr(_base_persona, "is_deceased", False)):
+            self._append_local_system_notice(
+                f"[Mortality] {getattr(_base_persona, 'agent_name', 'This persona')} is deceased and cannot take a new Solo turn."
+            )
+            self.is_generating = False
+            return
+
         if self.emoji_picker is not None and self.emoji_picker.winfo_exists():
             try:
                 self.emoji_picker.destroy()
@@ -1373,6 +1437,7 @@ class DunoonDaemonApp:
 
         if user_text:
             self._append_text("You", user_text, "#ff5555")
+            log_dialogue("USER", user_text, getattr(self.session, "agent_name", ""), getattr(self.session, "chat_mode_key", "continuation"))
 
         if attached_path:
             lower_path = attached_path.lower()
@@ -1382,7 +1447,7 @@ class DunoonDaemonApp:
             elif lower_path.endswith(('.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac')):
                 self._render_embedded_media_badge(attached_path, media_type="audio")
             else:
-                self._append_local_system_notice(f"📁 Ingested Document: {fname}")
+                self._append_local_system_notice(f"📁 Ingested document: {fname}")
 
         self._show_thinking()
         self.eyes.start_breathing()
@@ -1393,6 +1458,10 @@ class DunoonDaemonApp:
                 agent_display = getattr(self.session, "agent_name", "Kylo")
                 user_record = user_text
 
+                # User input is authoritative scene information. Assess actor-relative urgency
+                # before generation so the persona sees the current Dunoon-owned gauges this turn.
+                self._preflight_situation_gauges(user_text or f"[Attached input: {os.path.basename(attached_path) if attached_path else 'unknown'}]", source="solo_preflight")
+
                 try:
                     if attached_path:
                         lower_p = attached_path.lower()
@@ -1402,14 +1471,12 @@ class DunoonDaemonApp:
                             endpoint = self.get_active_endpoint()
                             context_directive = user_text if user_text else "Inspect and react to the attached image in character."
                             packet_user = f"{context_directive}\n\n[Attached Image: {fname}]"
-                            packet = build_overmind_packet(
+                            packet = build_actor_packet(
                                 packet_user,
                                 self.session,
                                 source="user"
                             )
                             user_record = f"[Attached Image: {fname}] {user_text}".strip()
-                            route_memory(user_record, session=self.session, is_user=True)
-                            self.eyes.trigger_working()
                             reply = send_multimodal_message(
                                 context_directive,
                                 file_path=attached_path,
@@ -1417,39 +1484,25 @@ class DunoonDaemonApp:
                                 system_prompt=packet["system"],
                                 history=packet["history"],
                             )
-                            # Direct vision transport bypasses overmind() generation, so mirror
-                            # its post-turn structured lifecycle explicitly.
-                            try:
-                                from overmind import get_session_eto, state_engine
-                                if getattr(self.session, "eto_enabled", True):
-                                    get_session_eto(self.session).analyze_and_update(packet_user, reply)
-                                if state_engine and reply and not str(reply).startswith("("):
-                                    state_engine.evaluate_turn_heuristics(packet_user, reply)
-                            except Exception as lifecycle_error:
-                                print(f"[Multimodal Lifecycle Warning]: {lifecycle_error}")
+                            # Direct vision transport also waits for the completion guard before
+                            # committing ETO/dynamic world state below.
                         else:
                             parsed = self.file_processor.process_file(attached_path)
                             content = parsed.get("content", "")
                             combined_text = f"{user_text}\n\n{content}" if user_text else content
                             user_record = f"[Attached File: {fname}] {user_text}".strip()
 
-                            route_memory(combined_text, session=self.session, is_user=True)
-                            self.eyes.trigger_working()
-
                             controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
                             if controller and hasattr(controller, "brain") and controller.brain:
-                                reply = controller.brain.infer(combined_text, self.session, source="user")
+                                reply = controller.brain.infer(combined_text, self.session, source="user", commit_lifecycle=False)
                             else:
-                                reply = overmind(combined_text, self.session, source="user")
+                                reply = overmind(combined_text, self.session, source="user", commit_lifecycle=False)
                     else:
-                        route_memory(user_text, session=self.session, is_user=True)
-                        self.eyes.trigger_working()
-
                         controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
                         if controller and hasattr(controller, "brain") and controller.brain:
-                            reply = controller.brain.infer(user_text, self.session, source="user")
+                            reply = controller.brain.infer(user_text, self.session, source="user", commit_lifecycle=False)
                         else:
-                            reply = overmind(user_text, self.session, source="user")
+                            reply = overmind(user_text, self.session, source="user", commit_lifecycle=False)
 
                     # Persist the genuine user turn exactly once, after inference so it is not
                     # duplicated as both history and the current model input.
@@ -1461,7 +1514,8 @@ class DunoonDaemonApp:
 
                 try:
                     finish_reason = get_last_finish_reason()
-                    _, clean_probe = _extract_dual_channel_meta(str(reply))
+                    meta_probe, clean_probe = _extract_dual_channel_meta(str(reply))
+                    clean_probe = _sanitize_protocol_leakage(clean_probe, agent_display)
                     incomplete, why = self._turn_incomplete(reply, clean_probe, finish_reason)
 
                     if incomplete:
@@ -1471,15 +1525,67 @@ class DunoonDaemonApp:
                             clean_probe
                         )
                         if repaired:
-                            reply = repaired
+                            clean_probe = _sanitize_protocol_leakage(repaired, agent_display)
+                            reply = clean_probe
+                            incomplete = False
                         else:
                             reply = (
                                 f"({agent_display}'s response was interrupted before completion. "
                                 "No in-world action was invented; press Continue to retry.)"
                             )
+                            clean_probe = reply
                             print(f"[Solo Turn Completion Guard] {agent_display}: {why}; {repair_error or 'repair unavailable'}")
 
-                    self.root.after(0, lambda: self._deliver_reply(reply))
+                    # Semantic authority gate: with collaborative worldbuilding OFF, unsupported consequential
+                    # external inventions are rewritten once before they can reach lifecycle, memory, or the UI.
+                    if not incomplete:
+                        try:
+                            from overmind import authority_claim_violations
+                            authority_claims = authority_claim_violations(meta_probe, session=self.session)
+                        except Exception as authority_check_error:
+                            print(f"[Solo Authority Claim Guard Warning]: {authority_check_error}")
+                            authority_claims = []
+                        if authority_claims:
+                            reason = "introduced unsupported consequential external claim(s): " + "; ".join(authority_claims[:4])
+                            repaired_clean, repaired_meta, repair_error = self._repair_scene_authority_reply(
+                                user_text if user_text else f"[Attached input: {os.path.basename(attached_path) if attached_path else 'unknown'}]",
+                                clean_probe,
+                                reason,
+                            )
+                            if repaired_clean:
+                                clean_probe = repaired_clean
+                                reply = repaired_clean
+                                meta_probe = repaired_meta if isinstance(repaired_meta, dict) else {}
+                            else:
+                                clean_probe = (
+                                    f"({agent_display}'s response introduced unsupported scene content and was rejected. "
+                                    "No new world state was committed; press Continue to retry.)"
+                                )
+                                reply = clean_probe
+                                incomplete = True
+                                print(f"[Solo Scene Authority Guard] {agent_display}: {reason}; {repair_error or 'repair unavailable'}")
+
+                    # Only sanitized accepted prose is allowed to reach lifecycle or the UI.
+                    safe_reply = clean_probe if clean_probe else _sanitize_protocol_leakage(reply, agent_display)
+
+                    if not incomplete:
+                        # Learned memory mutates only after the actor turn is accepted. This prevents
+                        # the live user message from being retrieved back into the very prompt it created.
+                        try:
+                            if user_record:
+                                routed = route_memory(user_record, session=self.session, is_user=True)
+                                _vault = (routed or {}).get("vault")
+                                if _vault:
+                                    self.eyes.trigger_vault(_vault)
+                        except Exception as memory_commit_error:
+                            print(f"[Solo User Memory Commit Warning]: {memory_commit_error}")
+                        try:
+                            from overmind import commit_completed_turn
+                            commit_completed_turn(user_text, safe_reply, session=self.session, source="user")
+                        except Exception as lifecycle_error:
+                            print(f"[Solo Completed-Turn Commit Warning]: {lifecycle_error}")
+
+                    self.root.after(0, lambda: self._deliver_reply(safe_reply))
                 except Exception as guard_error:
                     print(f"[Solo Turn Guard Error]: {guard_error}")
                     fallback = (
@@ -1496,13 +1602,101 @@ class DunoonDaemonApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _repair_scene_authority_reply(self, original_prompt, rejected_reply, failure_reason):
+        """One full rewrite when hidden semantic telemetry reports an unsupported external invention."""
+        agent_display = getattr(self.session, "agent_name", "Kylo")
+        repair_prompt = (
+            "[INTERNAL SCENE-AUTHORITY REPAIR]\n"
+            f"The previous response was rejected because it {failure_reason}.\n"
+            "Rewrite the ENTIRE response from scratch. Keep the intended helpful/in-character purpose, but use only "
+            "facts, resources, people, places, exits, capabilities and history already established by the user/system, "
+            "the current dynamic world state, or the persona's established capabilities. Do not mention this repair. "
+            "Return one complete response with the normal hidden telemetry envelope.\n\n"
+            f"[ORIGINAL USER PROMPT]\n{original_prompt}\n\n"
+            f"[REJECTED RESPONSE — REFERENCE ONLY, DO NOT CONTINUE IT]\n{rejected_reply}"
+        )
+        reset_last_finish_reason()
+        try:
+            controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
+            if controller and hasattr(controller, "brain") and controller.brain:
+                repaired_raw = controller.brain.infer(
+                    repair_prompt, self.session, source="internal_control", commit_lifecycle=False
+                )
+            else:
+                repaired_raw = overmind(
+                    repair_prompt, self.session, source="internal_control", commit_lifecycle=False
+                )
+        except Exception as e:
+            return None, None, f"scene-authority repair inference failed: {e}"
+
+        repaired_meta, repaired_clean = _extract_dual_channel_meta(str(repaired_raw))
+        repaired_clean = _sanitize_protocol_leakage(repaired_clean, agent_display)
+        still_bad, why = self._turn_incomplete(repaired_raw, repaired_clean, get_last_finish_reason())
+        if still_bad:
+            return None, None, f"scene-authority repair incomplete: {why}"
+        try:
+            from overmind import authority_claim_violations
+            claims = authority_claim_violations(repaired_meta, session=self.session)
+        except Exception:
+            claims = []
+        if claims:
+            return None, None, "scene-authority repair still introduced unsupported external claims"
+        return repaired_clean, repaired_meta, None
+
     def _handle_slash_command(self, cmd_str: str):
-        parts = cmd_str.strip().split()
+        import shlex
+        try: parts = shlex.split(cmd_str.strip())
+        except Exception: parts = cmd_str.strip().split()
         main_cmd = parts[0].lower()
         args = parts[1:]
 
-        if main_cmd == "/about":
-            self._append_local_system_notice("Dunoon Daemon Suite — to the loyal companions who walk with us through every realm, and the code that keeps their echoes alive. For Kylo. Made by RK (Kepler365) and Gemini (2026) 🐕.")
+        if main_cmd == "/skin":
+            if len(args) >= 2:
+                from skin_manager import register_custom_skin
+                name=args[0]; seeds=" ".join(args[1:])
+                register_custom_skin(name,seeds); save_skin(name)
+                try: self._set_modern_skin(name)
+                except Exception: pass
+                self._append_local_system_notice(f"[Skin] Created/updated global skin '{name}' from: {seeds}")
+            else:
+                self._append_local_system_notice('[Skin] Usage: /skin "name" "seed words, seed words"')
+
+        elif main_cmd == "/unskin":
+            from skin_manager import BUILTIN_SKIN_NAMES, unregister_custom_skin, unregister_all_custom_skins
+            if not args:
+                self._append_local_system_notice('[Skin] Usage: /unskin "name" or /unskin all')
+            elif str(args[0]).strip().casefold() == "all":
+                active = load_skin()
+                deleted = unregister_all_custom_skins()
+                if not deleted:
+                    self._append_local_system_notice("[Skin] No custom skins to delete.")
+                else:
+                    if active in deleted:
+                        save_skin("Murray Mint")
+                        try: self._set_modern_skin("Murray Mint")
+                        except Exception: pass
+                    try: self.skin_menu.configure(values=get_sorted_skin_names())
+                    except Exception: pass
+                    self._append_local_system_notice(f"[Skin] Deleted {len(deleted)} custom skin(s). Built-ins were preserved.")
+            else:
+                requested = " ".join(args).strip()
+                names = get_sorted_skin_names()
+                target = next((name for name in names if name.casefold() == requested.casefold()), requested)
+                if target in BUILTIN_SKIN_NAMES:
+                    self._append_local_system_notice(f"[Skin] '{target}' is built in and cannot be deleted.")
+                else:
+                    active = load_skin()
+                    ok, message = unregister_custom_skin(target)
+                    if ok and active == target:
+                        save_skin("Murray Mint")
+                        try: self._set_modern_skin("Murray Mint")
+                        except Exception: pass
+                    try: self.skin_menu.configure(values=get_sorted_skin_names())
+                    except Exception: pass
+                    self._append_local_system_notice(f"[Skin] {message}")
+
+        elif main_cmd == "/about":
+            self._append_local_system_notice("dunoon daemon 2.1.0 — to the loyal companions who walk with us through every realm, and the code that keeps their echoes alive. For Kylo. Created by sorvan76 (Kepler365) and ChatGPT — Human / AI Fusion (2026) 🐕.")
 
         elif main_cmd == "/talk":
             if args and args[0] in ("1", "2", "3"):
@@ -1511,7 +1705,30 @@ class DunoonDaemonApp:
                 desc = {1: "Slow / Deliberate", 2: "Medium / Standard", 3: "Fast / Rapid Pace"}[lvl]
                 self._append_local_system_notice(f"[Voice Engine] Speech speed set to Level {lvl} ({desc}).")
             else:
-                self._append_local_system_notice("[Voice Engine] Usage: /talk 1 (Slow), /talk 2 (Medium), /talk 3 (Fast)")
+                self._append_local_system_notice("[Voice Engine] Usage: /talk 1 | 2 | 3 (Slow | Medium | Fast)")
+
+        elif main_cmd in ("/nf", "/narrativefreedom"):
+            if not args:
+                state = "ON" if bool(getattr(self.session, "narrative_freedom", False)) else "OFF"
+                source = getattr(self.session, "narrative_freedom_source", lambda: "persona")()
+                self._append_local_system_notice(f"[Narrative Freedom] {state} ({source}). Usage: /nf on | /nf off | /nf inherit")
+            else:
+                choice = str(args[0]).strip().lower()
+                setter = getattr(self.session, "set_narrative_freedom_override", None)
+                if choice in ("on", "1", "true", "yes"):
+                    if callable(setter): setter(True)
+                    else: self.session.narrative_freedom = True
+                    self._append_local_system_notice("[Narrative Freedom] ON for this chat. Plausible non-contradictory scene invention is allowed; invented detail must not masquerade as remembered evidence.")
+                elif choice in ("off", "0", "false", "no"):
+                    if callable(setter): setter(False)
+                    else: self.session.narrative_freedom = False
+                    self._append_local_system_notice("[Narrative Freedom] OFF for this chat. Unknown consequential facts remain for the human user to establish.")
+                elif choice in ("inherit", "default", "persona") and callable(setter):
+                    setter(None)
+                    state = "ON" if bool(getattr(self.session, "narrative_freedom", False)) else "OFF"
+                    self._append_local_system_notice(f"[Narrative Freedom] Chat override cleared; inheriting persona default ({state}).")
+                else:
+                    self._append_local_system_notice("[Narrative Freedom] Usage: /nf on | /nf off | /nf inherit")
 
         elif main_cmd == "/forget":
             turns = 1
@@ -1522,6 +1739,11 @@ class DunoonDaemonApp:
                 remove_count = min(turns * 2, len(self.session.messages))
                 if remove_count > 0:
                     self.session.messages = self.session.messages[:-remove_count]
+                    # Continuation/Canvas mirror their transcript into the canonical persona session.
+                    if bool(getattr(self.session, "history_write_enabled", True)) and hasattr(self.session, "base_session"):
+                        base = self.session.base_session
+                        if hasattr(base, "messages") and isinstance(base.messages, list):
+                            base.messages = base.messages[:-min(remove_count, len(base.messages))]
                     if self.session_manager:
                         self.session_manager._save()
                     self._append_local_system_notice(f"[System] Cleared last {turns} conversational turn(s) from context window.")
@@ -1533,11 +1755,14 @@ class DunoonDaemonApp:
 
         elif main_cmd == "/remember":
             if args:
-                note_text = " ".join(args)
-                session_id = getattr(self.session, "id", None) or getattr(self.session, "session_id", None)
-                save_deep_memory_journal(note_text, session_id=session_id)
-                self.eyes.set_signal("#ffff00", sustain_seconds=2.5, pupil_scale=1.4)
-                self._append_local_system_notice(f"[Journal Vault] Forced direct memory injection: '{note_text}'")
+                if not bool(getattr(self.session, "memory_write_enabled", True)):
+                    self._append_local_system_notice("[Memory] This chat mode is sealed; long-term memory writing is disabled.")
+                else:
+                    note_text = " ".join(args)
+                    session_id = getattr(self.session, "memory_session_id", None) or getattr(self.session, "id", None) or getattr(self.session, "session_id", None)
+                    save_deep_memory_journal(note_text, session_id=session_id)
+                    self.eyes.set_signal("#ffff00", sustain_seconds=2.5, pupil_scale=1.4)
+                    self._append_local_system_notice(f"[Journal Vault] Forced direct memory injection: '{note_text}'")
             else:
                 self._append_local_system_notice("[Journal Vault] Usage: /remember [key text to remember]")
 
@@ -1567,15 +1792,25 @@ class DunoonDaemonApp:
                 self._append_local_system_notice("[System] Native C++ engine ejected from VRAM.")
 
         elif main_cmd == "/status":
-            ep = self.get_active_endpoint()
-            self._append_local_system_notice(f"[System Diagnostic]\n• Active Model: {MODEL_NAME}\n• Endpoint: {ep}\n• Speech Provider: {self.tts.provider}\n• Backend: {getattr(self.session, 'backend', 'LM Studio')}")
+            controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
+            handler = getattr(getattr(controller, "brain", None), "model_handler", None) if controller else None
+            model_name = os.path.basename(str(getattr(handler, "model_path", "") or "")) or (MODEL_NAME or "No model loaded")
+            context = getattr(handler, "n_ctx", None)
+            backend = str(getattr(handler, "backend", "native") or "native").upper()
+            active = bool(handler and getattr(handler, "is_active", lambda: False)())
+            context_text = f"{int(context):,} tokens" if context else "unknown"
+            self._append_local_system_notice(
+                f"[System Diagnostic]\n• Runtime: Dunoon Daemon native GGUF\n• Active model: {model_name}\n"
+                f"• Model state: {'Loaded' if active else 'Not loaded'}\n• Context: {context_text}\n"
+                f"• Backend: {backend}\n• Speech provider: {self.tts.provider}"
+            )
 
         elif main_cmd == "/clear":
             self.chat_text.delete("1.0", tk.END)
             self._append_local_system_notice("[Canvas Cleared]")
 
         else:
-            self._append_local_system_notice(f"[System] Unknown command '{main_cmd}'. Try /about, /talk 1-3, /forget x, /remember, /memories, /character, /status, or /clear.")
+            self._append_local_system_notice(f"[System] Unknown command '{main_cmd}'. Commands: /skin, /unskin, /nf on | off | inherit, /talk 1 | 2 | 3, /forget [n], /see, /look, /upload, /remember <text>, /memories, /vault, /character, /baseline, /ubaseline, /splash, /eject, /status, /clear, /about.")
 
     def _display_character_breakdown(self):
         try:
@@ -1585,13 +1820,13 @@ class DunoonDaemonApp:
             if mode == "grey_analytical":
                 self._append_local_system_notice(
                     f"[System Diagnostic] Psychological Profile for '{agent_display}':\n"
-                    "• Mode: Pure Analytical (Grey Person)\n"
-                    "• State: Mood Shifts Disabled / Fixed 50-Point Anchor\n"
-                    "• Openness          : ██████████░░░░░░░░░░ (50/100 [±0 pts]) → (Analytical)\n"
-                    "• Conscientiousness : ██████████░░░░░░░░░░ (50/100 [±0 pts]) → (Methodical)\n"
-                    "• Extraversion      : ██████████░░░░░░░░░░ (50/100 [±0 pts]) → (Reserved)\n"
-                    "• Agreeableness     : ██████████░░░░░░░░░░ (50/100 [±0 pts]) → (Objective)\n"
-                    "• Neuroticism       : ██████████░░░░░░░░░░ (50/100 [±0 pts]) → (Calm)"
+                    + "• Mode: Pure Analytical (Grey Person)\n"
+                    + "• State: Mood Shifts Disabled / Fixed 50-Point Anchor\n"
+                    "• Openness          : ██████████░░░░░░░░░░ (50 / 100 [±0 pts]) → (Analytical)\n"
+                    "• Conscientiousness : ██████████░░░░░░░░░░ (50 / 100 [±0 pts]) → (Methodical)\n"
+                    "• Extraversion      : ██████████░░░░░░░░░░ (50 / 100 [±0 pts]) → (Reserved)\n"
+                    "• Agreeableness     : ██████████░░░░░░░░░░ (50 / 100 [±0 pts]) → (Objective)\n"
+                    "• Neuroticism       : ██████████░░░░░░░░░░ (50 / 100 [±0 pts]) → (Calm)"
                 )
                 return
 
@@ -1653,7 +1888,7 @@ class DunoonDaemonApp:
 
     def _display_memories_breakdown(self):
         try:
-            session_id = getattr(self.session, "id", None) or getattr(self.session, "session_id", None) or "default_session"
+            session_id = getattr(self.session, "memory_session_id", None) or getattr(self.session, "id", None) or getattr(self.session, "session_id", None) or "default_session"
             session_paths = get_session_vault_paths(session_id)
 
             lines = [f"[System Diagnostic] Memory Vault Audit for '{self.session.name}':"]
@@ -1744,28 +1979,40 @@ class DunoonDaemonApp:
                 clean_reply = f"({agent_display} returned no usable response. Press ⏩ Continue or send another prompt to proceed.)"
 
         self.last_reply = clean_reply
-        self._type_out(agent_display, clean_reply, "#b300ff")
+        runtime_notice = (not is_empty_response) and is_runtime_artifact(clean_reply)
+        lower_reply = clean_reply.casefold()
+        resumable_notice = (
+            "interrupted before completion" in lower_reply
+            or "press continue to retry" in lower_reply
+            or "press ⏩ continue" in lower_reply
+        )
+        if runtime_notice:
+            self._append_local_system_notice(clean_reply)
+        else:
+            self._type_out(agent_display, clean_reply, "#b300ff")
 
-        if is_empty_response:
+        if is_empty_response or resumable_notice:
             self._start_continue_flash()
         else:
             self._stop_continue_flash()
 
-        # Persist only genuine replies
-        if not is_empty_response:
-            session_id = getattr(self.session, "id", None) or getattr(self.session, "session_id", None)
-            target_vault = meta_data.get("vault", "working")
-            significance = float(meta_data.get("significance", 0.5))
+        if runtime_notice:
+            log_dialogue("NOTICE", clean_reply, agent_display, getattr(self.session, "chat_mode_key", "continuation"))
+        else:
+            log_dialogue("ASSISTANT", clean_reply, agent_display, getattr(self.session, "chat_mode_key", "continuation"))
 
-            if target_vault == "deep" or significance >= 0.75:
-                primacy_count = getattr(self.session, "primacy_count", 0)
-                primacy_enabled = getattr(self.session, "primacy_enabled", True)
-                save_deep_memory_journal(clean_reply, session_id=session_id, primacy_count=primacy_count, primacy_enabled=primacy_enabled)
-                self.eyes.trigger_deep()
-                self.eyes.trigger_journal()
-            else:
-                save_working_memory(clean_reply, session_id=session_id)
-                self.eyes.trigger_working()
+        # Persist only genuine persona replies. Chat mode controls long-term memory independently
+        # from the local/current transcript. Runtime/software notices are never persona experiences.
+        if not is_empty_response and not runtime_notice:
+            memory_write = bool(getattr(self.session, "memory_write_enabled", True))
+            if memory_write:
+                try:
+                    routed = route_memory(clean_reply, session=self.session, is_user=False)
+                    _vault = (routed or {}).get("vault")
+                    if _vault:
+                        self.eyes.trigger_vault(_vault)
+                except Exception as memory_commit_error:
+                    print(f"[Solo Actor Memory Commit Warning]: {memory_commit_error}")
 
             self._persist_session("assistant", clean_reply)
 
@@ -1798,14 +2045,12 @@ class DunoonDaemonApp:
             try:
                 agent_display = getattr(self.session, "agent_name", "Kylo")
                 try:
-                    route_memory(prompt, session=self.session, is_user=True)
-                    self.eyes.trigger_working()
-
+                    self._preflight_situation_gauges(prompt, source="solo_continue_preflight")
                     controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
                     if controller and hasattr(controller, "brain") and controller.brain:
-                        reply = controller.brain.infer(prompt, self.session, source="user")
+                        reply = controller.brain.infer(prompt, self.session, source="internal_control", commit_lifecycle=False)
                     else:
-                        reply = overmind(prompt, self.session, source="user")
+                        reply = overmind(prompt, self.session, source="internal_control", commit_lifecycle=False)
 
                     self._persist_session("user", prompt)
                 except Exception as e:
@@ -1824,6 +2069,11 @@ class DunoonDaemonApp:
                             "Press Continue to retry.)"
                         )
                         print(f"[Solo Continue Guard] {agent_display}: {why}; {repair_error or 'repair unavailable'}")
+                try:
+                    from overmind import commit_completed_turn
+                    commit_completed_turn(prompt, reply, session=self.session, source="internal_control")
+                except Exception as lifecycle_error:
+                    print(f"[Solo Continue Commit Warning]: {lifecycle_error}")
                 self.root.after(0, lambda: self._deliver_reply(reply))
             finally:
                 try:
@@ -1841,8 +2091,9 @@ class DunoonDaemonApp:
             return
 
         picker = tk.Toplevel(self.root)
+        apply_window_icon(picker)
         self.emoji_picker = picker
-        picker.title("Emoji Palette")
+        picker.title("Emoji palette")
         picker.geometry("360x320")
         picker.resizable(False, True)
 
@@ -1938,6 +2189,11 @@ class DunoonDaemonApp:
 
         for c in range(cols):
             scrollable_frame.columnconfigure(c, weight=1)
+        try:
+            from modern_tooltips import ensure_button_tooltips
+            ensure_button_tooltips(picker, self.tooltips)
+        except Exception:
+            pass
 
     def _insert_emoji(self, emoji):
         self.entry.insert(tk.END, emoji)
@@ -2020,10 +2276,24 @@ class DunoonDaemonApp:
                 )
 
                 controller = getattr(self.session_manager, "controller_instance", None) if self.session_manager else None
-                if controller and hasattr(controller, "brain") and controller.brain:
-                    reply = controller.brain.infer(greeting_prompt, self.session, source="internal_control")
-                else:
-                    reply = overmind(greeting_prompt, self.session, source="internal_control")
+                # A fresh Sandbox/Bubble greeting must not use historical memory to resurrect
+                # the previous physical scene before the human has established a new one.
+                _restore_memory_read = bool(getattr(self.session, "memory_read_enabled", True))
+                if bool(getattr(self.session, "fresh_scene", False)):
+                    try:
+                        self.session.memory_read_enabled = False
+                    except Exception:
+                        pass
+                try:
+                    if controller and hasattr(controller, "brain") and controller.brain:
+                        reply = controller.brain.infer(greeting_prompt, self.session, source="internal_control")
+                    else:
+                        reply = overmind(greeting_prompt, self.session, source="internal_control")
+                finally:
+                    try:
+                        self.session.memory_read_enabled = _restore_memory_read
+                    except Exception:
+                        pass
 
             except Exception as e:
                 reply = f"({agent_display} stirs quietly into awareness.)"
@@ -2038,6 +2308,7 @@ def run_daemon(session=None, session_manager=None):
         session = _MiniSession()
 
     root = tk.Tk()
+    apply_window_icon(root, set_default=True)
 
     # --- Standalone Process Icon Hook ---
     icon_png_path = os.path.join(BASE_DIR, "splash_logo.png")

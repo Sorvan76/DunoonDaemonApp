@@ -1,63 +1,60 @@
 # memory_transfer.py — Cross-Persona Semantic Distillation Bridge
-import os
+from __future__ import annotations
+
 import json
+import os
+
 from config import get_session_vault_paths
-from memory_embeddings import semantic_search
+from memory_semantics import semantic_rank
+from memory_transactions import memory_transaction, load_json
+
 
 def retrieve_cross_persona_insights(query: str, current_session, sm, top_k: int = 2) -> list:
-    """Scans all permitted foreign vaults and extracts highly relevant semantic matches."""
-    if not sm or not query:
+    """Scan opted-in foreign vaults and return primary-model semantic matches with provenance."""
+    if not sm or not str(query or '').strip():
         return []
-        
+
     all_foreign_memories = []
     provenance = {}
-    current_id = getattr(current_session, "id", None)
-    
-    # 1. Iterate over all existing sessions in the registry
+    current_id = str(getattr(current_session, "id", None) or "")
+
     for sess_id, sess in getattr(sm, "sessions", {}).items():
+        sess_id = str(sess_id)
         if sess_id == current_id:
             continue
-            
-        # 2. Skip if the persona has NOT explicitly opted-in to share insights
-        if not getattr(sess, "share_insights", False):
+        if not bool(getattr(sess, "share_insights", False)):
             continue
-            
-        # 3. Pull from their Deep and Working memory vaults
+
         paths = get_session_vault_paths(sess_id)
-        for vault in ["deep_memory", "working_memory"]:
-            path = paths.get(vault)
-            if path and os.path.exists(path):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        if isinstance(data, list):
-                            for entry in data:
-                                if isinstance(entry, dict):
-                                    text_val = entry.get("text", "")
-                                    if text_val:
-                                        text_val = text_val.strip()
-                                        all_foreign_memories.append(text_val)
-                                        provenance.setdefault(text_val, set()).add(getattr(sess, "agent_name", sess_id))
-                                elif isinstance(entry, str) and entry.strip():
-                                    text_val = entry.strip()
-                                    all_foreign_memories.append(text_val)
-                                    provenance.setdefault(text_val, set()).add(getattr(sess, "agent_name", sess_id))
-                except Exception:
-                    pass
-                    
+        with memory_transaction(sess_id):
+            # Shared durable facts were previously omitted here, which meant an opted-in
+            # persona could share autobiographical chatter while its actual factual canary was
+            # literally absent from the candidate bank.  Factual memory is the first source so
+            # current learned facts participate in the same semantic ranking as deep/working.
+            for vault in ("factual_memory", "deep_memory", "working_memory"):
+                data = load_json(paths.get(vault, ""), [])
+                if not isinstance(data, list):
+                    continue
+                for entry in data:
+                    if isinstance(entry, dict):
+                        text_val = str(entry.get("text") or entry.get("summary") or "").strip()
+                    else:
+                        text_val = str(entry or "").strip()
+                    if not text_val:
+                        continue
+                    if text_val not in provenance:
+                        all_foreign_memories.append(text_val)
+                        provenance[text_val] = set()
+                    provenance[text_val].add(str(getattr(sess, "agent_name", sess_id) or sess_id))
+
     if not all_foreign_memories:
         return []
-        
-    # 4. Deduplicate and execute SentenceTransformer semantic sweep
-    unique_memories = list(set(all_foreign_memories))
-    matches = semantic_search(query, unique_memories, top_k=top_k)
-    
-    # 5. Format as injected system cues
+
+    matches = semantic_rank(str(query), all_foreign_memories, top_k=max(1, int(top_k)))
     formatted = []
-    for m in matches:
-        if not m:
-            continue
-        sources = sorted(provenance.get(m, {"Unknown persona"}))
-        source_label = ", ".join(sources)
-        formatted.append(f"[Cross-Persona Insight — source: {source_label}; second-hand]: {m}")
+    for memory in matches:
+        sources = sorted(provenance.get(memory, {"Unknown persona"}))
+        formatted.append(
+            f"[Cross-Persona Insight — source: {', '.join(sources)}; second-hand]: {memory}"
+        )
     return formatted

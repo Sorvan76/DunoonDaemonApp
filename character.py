@@ -123,6 +123,49 @@ def create_ocean_profile(weighted=True, stabilize=False, enabled=True):
     return generate_ocean_profile(weighted=weighted, stabilize=stabilize, enabled=enabled)
 
 
+def apply_ocean_base_scores(ocean_wrapper: dict, scores: dict) -> dict:
+    """Apply explicit 0-100 base scores while preserving each trait's core anchor.
+
+    Manual edits are identity edits, so active score is reset to the new base and
+    any daily mood delta is cleared.  Descriptor sampling remains the existing
+    OCEAN mechanism rather than creating a parallel personality system.
+    """
+    if not isinstance(ocean_wrapper, dict):
+        ocean_wrapper = generate_ocean_profile(weighted=False)
+    traits = ocean_wrapper.setdefault("traits", {})
+    for trait_name, pool in TRAIT_DICTIONARY.items():
+        raw = scores.get(trait_name, scores.get(trait_name.lower(), 50)) if isinstance(scores, dict) else 50
+        try:
+            value = max(0, min(100, int(round(float(raw)))))
+        except Exception:
+            value = 50
+        data = traits.get(trait_name)
+        if not isinstance(data, dict):
+            data = {}
+        core = data.get("core_descriptor")
+        if not core or core not in pool:
+            idx = max(0, min(len(pool)-1, int((value / 100.0) * (len(pool)-1))))
+            core = pool[idx]
+        data["base_score"] = value
+        data["score"] = value
+        data["daily_mood_delta"] = 0
+        data["core_descriptor"] = core
+        data["descriptors"] = assign_trait_descriptors(value, pool, core_descriptor=core)
+        traits[trait_name] = data
+    ocean_wrapper["enabled"] = True
+    return ocean_wrapper
+
+
+def randomise_ocean_profile(existing: dict = None) -> dict:
+    """Return a fresh weighted OCEAN profile for the modern editor Randomise button."""
+    enabled = True
+    stabilize = False
+    if isinstance(existing, dict):
+        enabled = bool(existing.get("enabled", True))
+        stabilize = bool(existing.get("stabilization_enabled", False))
+    return generate_ocean_profile(weighted=True, stabilize=stabilize, enabled=enabled)
+
+
 # ============================================================
 # DAILY MOOD ENGINE
 # ============================================================
@@ -153,8 +196,8 @@ def apply_daily_mood_variance(session) -> bool:
             base = float(data["base_score"])
             delta = roll_mood_delta()
             
-            min_allowed = max(5.0, base - 10.0)
-            max_allowed = min(95.0, base + 10.0)
+            min_allowed = max(0.0, base - 10.0)
+            max_allowed = min(100.0, base + 10.0)
             adjusted_score = max(min_allowed, min(max_allowed, base + delta))
             
             data["score"] = adjusted_score
