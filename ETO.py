@@ -52,6 +52,8 @@ class ETOEngine:
     - accepts generic structured hazards without defining a closed hazard taxonomy
     - uses the model's existing hidden mood/intensity telemetry as a broad
       pressure signal for scene urgency
+    - coexists with Dunoon-owned actor-relative threat/opportunity priority gauges;
+      ETO provides scene meaning while the state engine preserves their continuity
     - preserves the existing mortality API expected by controller.py
 
     What it DOES NOT do:
@@ -83,12 +85,6 @@ class ETOEngine:
 
         self.last_pressure = 0.0
         self.last_progress = 1.0
-
-        # Semantic progression memory. These fields deliberately track only broad
-        # causal momentum; Python does not try to parse distances, verbs or objects.
-        self.progress_debt = 0
-        self.low_progress_streak = 0
-        self.progression_history: List[str] = []
 
     # ------------------------------------------------------------------
     # AUTHORITATIVE NARRATIVE
@@ -247,27 +243,6 @@ class ETOEngine:
         self.last_pressure = max(0.0, min(1.0, pressure))
         self.last_progress = max(0.0, min(1.0, progress))
 
-        # Accumulate resolution pressure when the model itself reports that turns are
-        # failing to materially advance the situation. This is intentionally semantic:
-        # no action/object vocabulary and no fake numerical physics.
-        if self.last_progress < 0.35:
-            self.low_progress_streak += 1
-            self.progress_debt = min(6, self.progress_debt + 1)
-        elif self.last_progress >= 0.65:
-            self.low_progress_streak = 0
-            self.progress_debt = max(0, self.progress_debt - 2)
-        else:
-            self.low_progress_streak = max(0, self.low_progress_streak - 1)
-            self.progress_debt = max(0, self.progress_debt - 1)
-
-        if user_text or assistant_text:
-            snapshot = (
-                f"turn={self.current_turn} progress={self.last_progress:.2f} "
-                f"pressure={self.last_pressure:.2f}"
-            )
-            self.progression_history.append(snapshot)
-            self.progression_history = self.progression_history[-6:]
-
         explicit_threat_floor = 0.65 if self.threat else 0.0
         structured_hazard_pressure = max(
             (h.severity for h in self.hazards if not h.resolved),
@@ -289,6 +264,33 @@ class ETOEngine:
     # PROMPT / COGNITIVE DIRECTIVE
     # ------------------------------------------------------------------
 
+
+    def format_actor_lens_directive(self, actor_name: str = "") -> str:
+        """Model-led actor-relative ETO lens.
+
+        Python does not classify scene nouns or decide what can act. The model already
+        understands ordinary semantics. This directive asks it to apply that understanding
+        to accepted reality while preserving Dunoon's authority boundaries.
+        """
+        who = str(actor_name or "this actor").strip() or "this actor"
+        return "\n".join([
+            "[ETO ACTOR-RELATIVE LENS]",
+            f"Before choosing {who}'s next voluntary action, interpret the accepted current scene from {who}'s point of view.",
+            "Use ordinary real-world/common-sense semantics rather than waiting for explicit labels or hard-coded categories.",
+            f"Ask internally: given what {who} is, what matters here now, and what would {who} plausibly do? Do not answer from a generic observer viewpoint.",
+            f"Decision path: first perceive what {who} can perceive or reasonably know; then interpret what those perceived facts mean to {who} specifically; only then choose {who}'s voluntary response. Do not jump directly from stimulus strength to action.",
+            f"Actor-specific significance: translate perception into meaning through {who}'s nature, needs, instincts, psychology, priorities, current condition and established capabilities. Ask what each relevant thing represents to {who} now, not merely which signal is strongest or most recent.",
+            "Urgent action bias: when the situation is materially changing or dangerous and this actor already understands what matters, prefer a concrete voluntary attempt that can change the situation over repeatedly observing, reassessing, reassuring, waiting, or restating the same concern. Maintenance behaviour remains valid when it is itself necessary, effective, or the most plausible action for this actor; do not force action merely for novelty.",
+            "Environment: attend to established external conditions, ongoing changes, and things already happening that this actor can perceive or reasonably know about.",
+            "Threat: notice what can materially harm, trap, obstruct, expose, overwhelm, or otherwise matter negatively to this actor now, weighted by immediacy, physiology, capabilities, current condition, personality, and priorities.",
+            "Opportunity: notice actionable openings, leverage, access, safety, prey/resources/routes/advantages or other useful possibilities that plausibly matter to this actor now. Weight them through this actor's own nature, needs, instincts, psychology, priorities and present condition. Do not assume the strongest sensory signal, newest event, nearest motion, or most recently mentioned thing is automatically the most important. Do not promote a merely interesting or morally salient possibility above a more urgent constraint unless this actor's priorities genuinely support that choice.",
+            "Active scene factors: notice established people, groups, creatures, machinery, environmental processes, or other parts of reality whose behaviour or physical evolution can continue changing the situation without waiting for this actor's turn.",
+            "Reactive people and creatures are not passive scenery. They may respond plausibly to danger and changing circumstances using only capabilities and materials already established in the scene.",
+            "Affordances: established objects and conditions may be usable, blockable, climbable, movable, defensible, exploitable, escapable, or otherwise actionable when ordinary semantics and the scene support it. Never invent a convenient object, person, exit, resource, motive, or capability to create an affordance.",
+            "POV controls salience, not truth. Accepted CURRENT REALITY remains authoritative; private thoughts, guesses, metaphors, and another actor's unsupported perceptions do not become shared facts.",
+            "This lens shapes attention only. It does not issue goals or commands, does not choose the actor's action, and does not mutate shared reality. The actor still decides; the Director resolves external consequences.",
+        ])
+
     def format_directive(
         self,
         mortality_enabled: bool = False,
@@ -299,160 +301,45 @@ class ETOEngine:
         recent_context: str = "",
         narrative_freedom: bool = False,
     ) -> str:
-        """
-        Build a scenario-agnostic continuity directive.
-
-        There is deliberately no hard-coded list of media, hazards, weapons,
-        locations, actions, threats or opportunities here.
-        """
+        """Compact semantic continuity prompt. Python stores facts; the model uses common sense."""
         if is_deceased:
             return (
-                "\n[SCENE STATUS: DECEASED]\n"
-                "- This character has already suffered permanent death/defeat.\n"
-                "- Remain physically consistent with that established state. "
-                "Do not resume normal dialogue or voluntary action unless an authoritative "
-                "later event explicitly changes the state.\n"
+                "[CURRENT STATE: DECEASED]\n"
+                "This character is dead and cannot resume voluntary action or dialogue unless later authoritative input reverses it."
             )
 
         authoritative_scene = self._authoritative_scene_text()
-        active_phys = (
-            physiology.strip()
-            if physiology and physiology.strip()
-            else "Not specifically defined; infer conservatively from established character facts."
-        )
-        active_powers = (
-            powers.strip()
-            if powers and powers.strip()
-            else "No additional powers are established beyond the character/scenario context."
-        )
-
-        lines = [
-            "\n[ETO: SEMANTIC SCENE CONTINUITY]",
-            "Interpret the scene from narrative meaning and causal relationships, not from trigger-word matching.",
-        ]
-
+        lines = ["[SCENE CONTINUITY]"]
         if authoritative_scene:
-            lines.extend([
-                "\n[AUTHORITATIVE SCENE ANCHORS — OLDEST TO NEWEST]",
-                authoritative_scene,
-            ])
+            lines.append("Authoritative scene facts:")
+            lines.append(authoritative_scene)
         else:
-            lines.append(
-                "\n[AUTHORITATIVE SCENE ANCHORS]\n"
-                "No detailed physical scene has yet been authoritatively established. "
-                "Do not invent a default location, terrain, atmosphere, medium, threat, or resource."
-            )
+            lines.append("No detailed scene has been authoritatively established. Preserve uncertainty instead of inventing essentials.")
 
         if self.location:
-            lines.append(f"\n• Explicit Location Cue: {self.location}")
+            lines.append(f"Location cue: {self.location}")
         if self.threat:
-            lines.append(f"• Explicit Threat / Pressure Cue: {self.threat}")
+            lines.append(f"Threat cue: {self.threat}")
         if self.opportunity:
-            lines.append(f"• Explicit Opportunity / Leverage Cue: {self.opportunity}")
+            lines.append(f"Opportunity cue: {self.opportunity}")
 
-        lines.extend([
-            f"• Physiology / Tolerances: {active_phys}",
-            f"• Powers / Capabilities: {active_powers}",
-        ])
+        lines.append(f"Physiology: {physiology.strip() if physiology and physiology.strip() else 'not specifically defined'}")
+        lines.append(f"Capabilities: {powers.strip() if powers and powers.strip() else 'none additionally established'}")
 
         active_hazards = [h for h in self.hazards if not h.resolved]
         if active_hazards:
-            lines.append("\n[STRUCTURED ACTIVE PRESSURES]")
-            for h in active_hazards:
-                lines.append(
-                    f"• {h.description} | severity={h.severity:.2f} | "
-                    f"active_turns={h.turns_active} | source={h.source}"
-                )
-
-        if self.current_turn:
-            lines.extend([
-                "\n[PREVIOUS-TURN SEMANTIC TELEMETRY]",
-                f"pressure={self.last_pressure:.2f} | progress={self.last_progress:.2f}",
-                "These are semantic summaries, not proof of any particular physical fact."
-            ])
+            lines.append("Active pressures: " + "; ".join(h.description for h in active_hazards[:5]))
 
         lines.extend([
-            "\n[GROUNDING & CONTINUITY RULES]",
-            "1. SOURCE AUTHORITY: Direct user/scenario statements and explicit system/live-event interventions establish reality. "
-            "Autonomous character prose cannot silently overwrite them by implication, embellishment or metaphor.",
-
-            "2. REASON FROM MEANING: Understand what the narrative says actually happened. Do not reduce the scene to isolated words, "
-            "and do not treat the mere mention of a material, place, danger, object or motion as an automatic global state change.",
-
-            "3. ENVIRONMENT ≠ ENTITY STATE: The wider scene and an individual entity's state are different facts. Preserve each entity's "
-            "established location, containment, support, posture, orientation, possessions, exposure and relationship to nearby features.",
-
-            "4. CAUSAL TRANSITIONS: Before changing an established physical state, identify the action, event, force, decision or explicit "
-            "statement that caused the change. If no plausible transition occurred, retain the established state.",
-
-            "5. SPECIFIC FACTS OUTRANK BROAD INFERENCE: A specific established relation remains true until changed. Broad atmosphere, terrain, "
-            "weather, medium, danger or mood must not erase a more specific fact about where an entity is or what condition it is in.",
-
-            "6. CONSEQUENCES FOLLOW CAUSES: Apply realistic consequences to established events, physiology and capabilities, but do not invent "
-            "the causal event merely to justify a dramatic consequence.",
-
-            "7. OBJECT & TERRAIN CONTINUITY: Established objects, exits, barriers, distances, damage, transfers, consumption and destruction "
-            "remain part of the scene until something actually changes them. Do not conjure convenient new resources.",
-
-            "8. CAPABILITY BOUNDS: Use only abilities, equipment, spells, technology or unusual physiology supported by the persona, backstory, "
-            "authoritative scene or explicit powers field.",
-
-            "9. DESCRIPTIVE LANGUAGE IS NOT AUTOMATIC PHYSICS: Metaphor, emotional framing, sensory exaggeration and atmospheric prose do not "
-            "by themselves alter depth, location, containment, gravity, breathing status, orientation or bodily condition.",
-
-            "10. UNCERTAINTY: When the narrative does not establish a fact, preserve uncertainty. Do not replace unknowns with convenient defaults.",
-
-            "11. AGENCY & PROGRESS: In active danger or urgent constraint, choose actions consistent with the character's personality and abilities. "
-            "Do not confuse compassion, confidence, aggression, fear or calmness with ignorance of obvious physical stakes.",
-
-            "12. EMBODIMENT: Maintain plausible reach, line of sight, movement, support and physical interaction, but avoid repetitive procedural "
-            "body narration when nothing materially changes.",
-
-            "13. STATE PROGRESSION: Established actions and processes must change the world when they have a plausible opportunity to do so. "
-            "Do not restart an ongoing action from its original state on every turn. If movement, pursuit, opening, climbing, falling, damage, "
-            "consumption, escape, approach, retreat, recovery or any other process continues without an established interruption, reflect its "
-            "accumulated consequence in the next state.",
-
-            "14. MEASUREMENTS ARE SNAPSHOTS: A distance, position, amount, condition or relationship stated earlier describes that moment. "
-            "After a causal transition, do not keep reasserting the old measurement as though it were immutable. When exact recalculation is not "
-            "supported, use honest relational progression such as closer, farther, nearly there, within reach, reached, worsening, depleted or resolved "
-            "rather than inventing false precision.",
-
-            "15. RESOLVE MATURE ACTIONS: When an intended action has been repeatedly and successfully advanced, and no established obstacle prevents "
-            "completion, resolve it or produce its concrete consequence. Do not indefinitely narrate equivalent attempts merely to prolong the scene.",
-
-            "16. CAUSAL LEDGER: Before responding, compare the newest scene state with the immediately preceding one. Ask what materially changed because "
-            "of completed or ongoing actions, then continue from that changed state rather than from the original setup.",
+            "Rules:",
+            "1. Current accepted state overrides older snapshots where they conflict.",
+            "2. Do not conjure consequential objects, exits, people, powers or facts unless collaborative worldbuilding permits it.",
+            "3. Apply ordinary causal consequences to established events, bodies, objects and conditions.",
+            "4. Intentions, guesses, metaphors and failed attempts do not become completed physical state.",
+            "5. In danger, understand the stakes but choose behaviour according to this character's personality and capabilities.",
         ])
-
-        # Narrative authorship policy is injected independently by Overmind.
-
-        if self.progress_debt >= 2 or self.low_progress_streak >= 2:
-            lines.extend([
-                "\n[STATE RESOLUTION PRESSURE]",
-                f"Recent semantic telemetry indicates repeated weak progression (resolution pressure={self.progress_debt}).",
-                "Inspect the actual narrative rather than assuming a particular action. If an established action/process has had enough uninterrupted "
-                "opportunity to advance or complete, carry its consequences forward now. Do not repeat the same attempt from the same starting state. "
-                "If something genuinely prevents progress, make that established obstruction consequential instead of silently freezing the world."
-            ])
-
-        if self.stagnation_turns >= 2 and self.stakes_level >= 0.6:
-            lines.extend([
-                "\n[ANTI-LOOP GUIDANCE]",
-                "Semantic pressure has remained high across several turns. Assess the scene itself: "
-                "if the interaction is genuinely repeating without material change, take a consequential action or make a decision "
-                "that follows naturally from the character and established situation. If meaningful progress is already occurring, "
-                "continue it rather than forcing an unrelated action.",
-            ])
-
         if mortality_enabled:
-            lines.extend([
-                "\n[MORTALITY PROTOCOL: ACTIVE]",
-                "Permanent injury/death is possible when established events and physiology genuinely support it.",
-                "Do not grant plot armour, but do not manufacture lethal outcomes merely because the scene feels dramatic.",
-                "Death must follow an established cause and must remain permanent unless an authoritative later event genuinely reverses it.",
-            ])
-
+            lines.append("Mortality is enabled: death/injury may occur only when established events and physiology genuinely support it.")
         return "\n".join(lines)
 
 

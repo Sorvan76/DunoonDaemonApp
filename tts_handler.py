@@ -20,8 +20,17 @@ except ImportError:
     PYTTSX3_AVAILABLE = False
 
 VOICE_CONFIGS = {
+    # Curated natural voices first. Keep the list useful rather than dumping every Edge voice.
     "Sonia (UK Neural)": {"voice": "en-GB-SoniaNeural", "pitch": "+0Hz", "rate": "+0%"},
     "Ryan (UK Neural)": {"voice": "en-GB-RyanNeural", "pitch": "+0Hz", "rate": "+0%"},
+    "Libby (UK Neural)": {"voice": "en-GB-LibbyNeural", "pitch": "+0Hz", "rate": "+0%"},
+    "Emma (US Multilingual)": {"voice": "en-US-EmmaMultilingualNeural", "pitch": "+0Hz", "rate": "+0%"},
+    "Andrew (US Multilingual)": {"voice": "en-US-AndrewMultilingualNeural", "pitch": "+0Hz", "rate": "+0%"},
+    "Brian (US Multilingual)": {"voice": "en-US-BrianMultilingualNeural", "pitch": "+0Hz", "rate": "+0%"},
+    "Aria (US Neural)": {"voice": "en-US-AriaNeural", "pitch": "+0Hz", "rate": "+0%"},
+    "Jenny (US Neural)": {"voice": "en-US-JennyNeural", "pitch": "+0Hz", "rate": "+0%"},
+
+    # Dunoon archetypes. These deliberately alter pitch/rate rather than pretending to be new models.
     "Monster / Demon": {"voice": "en-US-ChristopherNeural", "pitch": "-30Hz", "rate": "-15%"},
     "Robot / Synthetic": {"voice": "en-US-GuyNeural", "pitch": "+15Hz", "rate": "+10%"},
     "Goblin / Gremlin": {"voice": "en-GB-MaisieNeural", "pitch": "+30Hz", "rate": "+20%"},

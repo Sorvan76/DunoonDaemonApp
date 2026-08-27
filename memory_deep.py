@@ -3,7 +3,8 @@ import json
 import os
 import threading
 from config import get_session_vault_paths, BASE_DIR, ensure_dirs
-from memory_embeddings import store_embedding, semantic_search
+from memory_semantics import semantic_rank
+from memory_transactions import memory_transaction, load_json, atomic_save_json
 from journal_vault import add_journal_entry
 from journal_entry import JournalEntry, make_journal_id, now_iso
 from significance import score_significance
@@ -11,7 +12,7 @@ from significance import score_significance
 ensure_dirs()
 DEEP_MAX_ENTRIES = 1000
 
-_deep_lock = threading.Lock()
+_deep_lock = threading.RLock()
 
 def _get_path(session_id: str = None) -> str:
     if session_id:
@@ -21,38 +22,21 @@ def _get_path(session_id: str = None) -> str:
     return os.path.join(fallback_dir, "deep_memory.json")
 
 def _load_file(path: str) -> list:
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data if isinstance(data, list) else []
-        except Exception:
-            return []
-    return []
+    data = load_json(path, [])
+    return data if isinstance(data, list) else []
 
 def _save_file(path: str, items: list):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = f"{path}.tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(items, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+    return atomic_save_json(path, items)
 
 def save_deep_memory_raw(text: str, session_id: str = None):
-    """Saves a string entry into session-scoped deep memory with thread lock and vector embedding."""
+    """Saves a string entry into session-scoped deep memory with thread lock and primary-model semantic judgement."""
     if not text or not str(text).strip():
         return
 
     clean_text = str(text).strip()
     path = _get_path(session_id)
 
-    with _deep_lock:
+    with memory_transaction(session_id), _deep_lock:
         memories = _load_file(path)
 
         existing_strings = [
@@ -65,49 +49,44 @@ def save_deep_memory_raw(text: str, session_id: str = None):
             memories = memories[-DEEP_MAX_ENTRIES:]
             _save_file(path, memories)
 
-    try:
-        store_embedding(clean_text, session_id=session_id)
-    except Exception:
-        pass
 
 def save_deep_memory_journal(text: str, session_id: str = None, primacy_count: int = 0, primacy_enabled: bool = True):
-    """Scores significance, creates a journal record, and commits to deep memory."""
+    """Score and commit journal + deep memory as one persona-scoped transaction."""
     if not text or not str(text).strip():
         return
 
     clean_text = str(text).strip()
-    significance = score_significance(clean_text, session_id=session_id)
+    with memory_transaction(session_id):
+        significance = score_significance(clean_text, session_id=session_id)
+        if primacy_enabled and primacy_count > 100 and significance < 0.6:
+            return
 
-    if primacy_enabled and primacy_count > 100 and significance < 0.6:
-        return
+        entry = JournalEntry(
+            id=make_journal_id(clean_text),
+            text=clean_text,
+            summary=clean_text,
+            timestamp=now_iso(),
+            tags=["deep"],
+            significance=significance,
+        )
 
-    entry = JournalEntry(
-        id=make_journal_id(clean_text),
-        text=clean_text,
-        summary=clean_text,
-        timestamp=now_iso(),
-        tags=["deep"],
-        significance=significance,
-    )
-
-    try:
-        add_journal_entry(entry, session=session_id)
-    except Exception as e:
-        print(f"[Journal Vault Warning]: {e}")
-
-    save_deep_memory_raw(clean_text, session_id=session_id)
+        try:
+            add_journal_entry(entry, session=session_id)
+        except Exception as e:
+            print(f"[Journal Vault Warning]: {e}")
+        save_deep_memory_raw(clean_text, session_id=session_id)
 
 def load_deep_memory(session_id: str = None, limit: int = 50) -> list:
     """Thread-safe disk read of the active session's deep memories."""
     path = _get_path(session_id)
-    with _deep_lock:
+    with memory_transaction(session_id), _deep_lock:
         memories = _load_file(path)
         return memories[-limit:]
 
 def retrieve_relevant_deep_memories(query: str, session_id: str = None, top_k: int = 5) -> list:
     """Reads directly from session disk to run semantic similarity scoring."""
     path = _get_path(session_id)
-    with _deep_lock:
+    with memory_transaction(session_id), _deep_lock:
         memories = _load_file(path)
 
     clean_memories = [
@@ -119,4 +98,4 @@ def retrieve_relevant_deep_memories(query: str, session_id: str = None, top_k: i
     if not clean_memories:
         return []
 
-    return semantic_search(query, clean_memories, top_k=top_k, session_id=session_id)
+    return semantic_rank(query, clean_memories, top_k=top_k)

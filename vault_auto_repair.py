@@ -14,49 +14,41 @@ from config import (
     get_session_vault_paths,
     ensure_dirs
 )
+from memory_transactions import memory_transaction, load_json, atomic_save_json
+
+def _atomic_json_write(path: str, value):
+    """Repair write using the same durable writer as live memory."""
+    return atomic_save_json(path, value)
 
 def _repair_file_list(path: str):
     if not os.path.exists(path):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump([], f)
+        _atomic_json_write(path, [])
     else:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if not isinstance(data, list):
-                    raise ValueError("Invalid format")
-        except Exception:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump([], f)
+        data = load_json(path, None)
+        if not isinstance(data, list):
+            _atomic_json_write(path, [])
 
 def _repair_file_dict(path: str):
     """Repair JSON stores that are expected to be dictionaries (e.g. embeddings)."""
     if not os.path.exists(path):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({}, f)
+        _atomic_json_write(path, {})
         return
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict):
-                raise ValueError("Invalid dictionary format")
-    except Exception:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({}, f)
+    data = load_json(path, None)
+    if not isinstance(data, dict):
+        _atomic_json_write(path, {})
 
 def repair_vaults(session_id: str = None):
     ensure_dirs()
     
     if session_id:
-        v_paths = get_session_vault_paths(session_id)
-        for key, p in v_paths.items():
-            if isinstance(p, str) and p.endswith(".json"):
-                if key == "embeddings":
-                    _repair_file_dict(p)
-                else:
-                    _repair_file_list(p)
+        with memory_transaction(session_id):
+            v_paths = get_session_vault_paths(session_id)
+            for key, p in v_paths.items():
+                if isinstance(p, str) and p.endswith(".json"):
+                    if key == "embeddings":
+                        _repair_file_dict(p)
+                    else:
+                        _repair_file_list(p)
         return
 
     # 1. Repair Global Vault Fallbacks
@@ -70,21 +62,23 @@ def repair_vaults(session_id: str = None):
         RESET_MEMORY_FILE,
         PRUNE_TELEMETRY_FILE,
     ]
-    for path in global_paths:
-        _repair_file_list(path)
+    with memory_transaction(None):
+        for path in global_paths:
+            _repair_file_list(path)
 
     # 2. Repair All Active Session Sub-Vaults
     if os.path.exists(SESSIONS_DIR):
         for item in os.listdir(SESSIONS_DIR):
             sess_dir = os.path.join(SESSIONS_DIR, item)
             if os.path.isdir(sess_dir):
-                s_paths = get_session_vault_paths(item)
-                for key, p in s_paths.items():
-                    if isinstance(p, str) and p.endswith(".json"):
-                        if key == "embeddings":
-                            _repair_file_dict(p)
-                        else:
-                            _repair_file_list(p)
+                with memory_transaction(item):
+                    s_paths = get_session_vault_paths(item)
+                    for key, p in s_paths.items():
+                        if isinstance(p, str) and p.endswith(".json"):
+                            if key == "embeddings":
+                                _repair_file_dict(p)
+                            else:
+                                _repair_file_list(p)
 
 if __name__ == "__main__":
     repair_vaults()

@@ -13,32 +13,16 @@ from config import (
     get_session_vault_paths,
     ensure_dirs
 )
+from memory_transactions import memory_transaction, load_json, atomic_save_json
 
 ensure_dirs()
 
 def _load_safe(path):
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                return data
-    except Exception:
-        pass
-    return []
+    data = load_json(path, [])
+    return data if isinstance(data, list) else []
 
 def _save_safe(path, data):
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp_path = f"{path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp_path, path)
-    except Exception:
-        if os.path.exists(f"{path}.tmp"):
-            try: os.remove(f"{path}.tmp")
-            except Exception: pass
+    return atomic_save_json(path, data)
 
 def _clean_memory_list(mem_list):
     """Sanitize memories without silently deleting supported structured entries."""
@@ -71,6 +55,7 @@ def check_memory_integrity(session_id: str = None):
             "intent": v_paths["intent_memory"],
             "task": v_paths["task_memory"],
             "factual": v_paths["factual_memory"],
+            "superseded": v_paths["superseded_memory"],
             "continuation": v_paths["continuation_memory"],
             "reset": v_paths["reset_memory"],
             "prune_telemetry": v_paths["prune_telemetry"],
@@ -88,12 +73,13 @@ def check_memory_integrity(session_id: str = None):
         }
 
     report = {}
-    for name, path in vault_paths.items():
-        before = _load_safe(path)
-        after = _clean_memory_list(before)
-        _save_safe(path, after)
-        report[name] = {
-            "before": len(before),
-            "after": len(after),
-        }
+    with memory_transaction(session_id):
+        for name, path in vault_paths.items():
+            before = _load_safe(path)
+            after = _clean_memory_list(before)
+            _save_safe(path, after)
+            report[name] = {
+                "before": len(before),
+                "after": len(after),
+            }
     return report

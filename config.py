@@ -54,7 +54,7 @@ STATE_MATRIX_FILE = os.path.join(VAULTS_DIR, "state_matrix.json")
 # --- Primary LLM Server Defaults (llama-server Engine) ---
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8080
-DEFAULT_CONTEXT = 8192
+DEFAULT_CONTEXT = 16384
 DEFAULT_N_GPU_LAYERS = 99
 
 # --- Capacity Bounds ---
@@ -63,11 +63,19 @@ DEEP_MAX_ENTRIES = 1000
 
 
 def get_session_vault_dir(session_id: str) -> str:
-    """
-    Returns the dedicated vaults directory for a specific session UUID,
-    creating it if it does not already exist.
-    """
-    vault_dir = os.path.join(SESSIONS_DIR, str(session_id), "vaults")
+    """Return a session-scoped vault directory without allowing path escape."""
+    sid = str(session_id or "").strip()
+    if not sid or sid in {".", ".."} or os.path.isabs(sid) or any(sep and sep in sid for sep in {os.sep, os.altsep, "/", "\\"}):
+        raise ValueError("Invalid session id path component")
+    base = os.path.realpath(SESSIONS_DIR)
+    session_dir = os.path.realpath(os.path.join(base, sid))
+    try:
+        inside = os.path.commonpath([base, session_dir]) == base
+    except ValueError:
+        inside = False
+    if not inside:
+        raise ValueError("Session id escapes sessions directory")
+    vault_dir = os.path.join(session_dir, "vaults")
     os.makedirs(vault_dir, exist_ok=True)
     return vault_dir
 
@@ -86,6 +94,7 @@ def get_session_vault_paths(session_id: str) -> dict:
         "intent_memory": os.path.join(v_dir, "intent_memory.json"),
         "task_memory": os.path.join(v_dir, "task_memory.json"),
         "factual_memory": os.path.join(v_dir, "factual_memory.json"),
+        "superseded_memory": os.path.join(v_dir, "superseded_memory.json"),
         "continuation_memory": os.path.join(v_dir, "continuation_memory.json"),
         "reset_memory": os.path.join(v_dir, "reset_memory.json"),
         "prune_telemetry": os.path.join(v_dir, "prune_telemetry.json"),
@@ -99,8 +108,11 @@ def detect_hardware_backend() -> str:
     Returns: 'cuda', 'vulkan', or 'cpu'
     """
     try:
-        cmd = 'powershell -NoProfile -Command "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"'
-        output = subprocess.check_output(cmd, shell=True, text=True, errors="ignore").strip().upper()
+        cmd = [
+            "powershell", "-NoProfile", "-Command",
+            "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
+        ]
+        output = subprocess.check_output(cmd, shell=False, text=True, errors="ignore").strip().upper()
         
         if "NVIDIA" in output:
             return "cuda"

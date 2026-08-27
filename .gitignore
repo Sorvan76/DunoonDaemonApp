@@ -1,13 +1,34 @@
-﻿_internal/
-*.gguf
-*.bin
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments / local tooling
+.venv/
+venv/
+.vscode/
+.idea/
+*.env
+
+# PyInstaller & build artifacts
+build/
+dist/
+*.spec
+!DunoonDaemon_portable.spec
+
+# Heavy local AI weights and native runtime bundle
+models/*
+!models/.gitkeep
+bin/
+
+# Runtime-created app state
+data/*
+!data/.gitkeep
+last_dirs.json
+skin.json
+daemon_skin.json
+custom_skins.json
+
+# Release archives and temporary packages
 *.zip
 *.tar.gz
-bin/*.exe
-bin/*.dll
-data/sessions/*/vaults/
-data/audio_cache/
-__pycache__/
-*.pyc
-custom_context.json
-last_dirs.json

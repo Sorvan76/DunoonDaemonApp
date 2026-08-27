@@ -18,6 +18,16 @@ PAD_X_MED   = 12
 PAD_Y_MED   = 8
 
 SKINS = {
+    # 🐉 Silver Wyrm: permanent built-in palette captured from the live beige/mint
+    # interface accepted during finishing tests. Keep these literal values stable.
+    "Murray Mint": {
+        "bg": "#eadacc", "fg": "#111111", "accent": "#919e56",
+        "button_bg": "#c1b8a9", "button_fg": "#111111",
+        "entry_bg": "#d6c6b8", "entry_fg": "#111111",
+        "frame_bg": "#eadacc", "tree_bg": "#eadacc", "tree_fg": "#111111",
+        "tree_header_bg": "#c1b8a9", "tree_header_fg": "#111111",
+        "scroll_bg": "#c1b8a9", "scroll_trough": "#d6c6b8",
+    },
     "Fallout": {
         "bg": "#020d04", "fg": "#1bfd00", "accent": "#ffcc00",
         "button_bg": "#0b290d", "button_fg": "#1bfd00",
@@ -552,26 +562,98 @@ SKINS = {
      }
 }
 
+BUILTIN_SKIN_NAMES = frozenset(SKINS.keys())
+
+# Load user-generated global skins after built-ins.
+try:
+    from custom_skins import load_custom_skins
+    for _name, _spec in load_custom_skins().items():
+        _pal = (_spec or {}).get("palette") if isinstance(_spec, dict) else None
+        if _name and isinstance(_pal, dict):
+            SKINS[_name] = dict(_pal)
+except Exception:
+    pass
+
+def register_custom_skin(name, seed_words):
+    from custom_skins import save_custom_skin
+    pal = save_custom_skin(name, seed_words)
+    SKINS[str(name).strip()] = dict(pal)
+    return pal
+
+
+def unregister_custom_skin(name):
+    """Delete one custom skin. Built-ins are immutable."""
+    target = str(name or "").strip()
+    if not target:
+        return False, "Skin name is empty."
+    if target in BUILTIN_SKIN_NAMES:
+        return False, f"'{target}' is a built-in skin and cannot be deleted."
+    from custom_skins import delete_custom_skin
+    if not delete_custom_skin(target):
+        return False, f"Custom skin '{target}' was not found."
+    SKINS.pop(target, None)
+    return True, f"Deleted custom skin '{target}'."
+
+
+def unregister_all_custom_skins():
+    """Delete every custom skin while preserving all built-ins."""
+    from custom_skins import clear_custom_skins
+    deleted = clear_custom_skins()
+    for name in list(deleted):
+        if name not in BUILTIN_SKIN_NAMES:
+            SKINS.pop(name, None)
+    return deleted
+
 def get_sorted_skin_names():
     return sorted(list(SKINS.keys()))
 
 def load_skin():
+    # Prefer the runtime UI preference so code-only update overlays do not reset the user's skin.
+    try:
+        from ui_preferences import load_ui_preferences
+        preferred = str(load_ui_preferences().get("last_skin") or "").strip()
+        if preferred in SKINS:
+            return preferred
+    except Exception:
+        pass
     try:
         if os.path.exists(SKIN_FILE):
             with open(SKIN_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, dict):
-                    return data.get("current_skin", "Dark")
+            if isinstance(data, dict):
+                preferred = str(data.get("current_skin") or "").strip()
+                if preferred in SKINS:
+                    return preferred
     except Exception:
         pass
-    return "Dark"
+    return "Murray Mint"
 
 def save_skin(name):
+    """Persist the last selected skin atomically so a power loss cannot leave a half-written preference."""
     try:
-        with open(SKIN_FILE, "w", encoding="utf-8") as f:
+        if name not in SKINS:
+            return
+        os.makedirs(os.path.dirname(SKIN_FILE) or ".", exist_ok=True)
+        tmp = f"{SKIN_FILE}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"current_skin": name}, f, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp, SKIN_FILE)
+        try:
+            from ui_preferences import save_ui_preferences
+            save_ui_preferences(last_skin=name)
+        except Exception:
+            pass
     except Exception:
-        pass
+        try:
+            if os.path.exists(f"{SKIN_FILE}.tmp"):
+                os.remove(f"{SKIN_FILE}.tmp")
+        except Exception:
+            pass
 
 def _apply_ttk_styles(style: ttk.Style, skin: dict):
     style.theme_use("default")
